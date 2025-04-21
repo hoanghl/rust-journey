@@ -2,6 +2,7 @@
 // Definition for enum and constants
 // ================================================
 
+#[derive(Copy, Clone)]
 #[repr(u8)]
 pub enum PacketId {
     Heartbeat = 0,
@@ -29,8 +30,8 @@ pub enum Request {
 pub const BYTE_SEP_CHARACTER: u8 = 124; // byte value of character '|'
 
 pub struct Packet {
-    packet_id: PacketId,
-    payload: Option<Vec<u8>>,
+    pub packet_id: PacketId,
+    pub payload: Option<Vec<u8>>,
 }
 
 // ================================================
@@ -84,7 +85,7 @@ impl Packet {
     pub fn from_bytes(bytes: &[u8]) -> Packet {
         assert!(bytes.len() >= 5, "Length of bytes not greater than 5");
         let packet_id = PacketId::from_u8(bytes[0]);
-        let payload_size = u32::from_be_bytes(bytes[1..4].try_into().expect("Incorrect length"));
+        let payload_size = u32::from_be_bytes(bytes[1..5].try_into().expect("Incorrect length"));
         assert!(
             bytes.len() == (5 + payload_size) as usize,
             "Length of bytes not equal {} ( = 1 + 4 + {})",
@@ -97,5 +98,51 @@ impl Packet {
             packet_id,
             payload: Some(payload),
         }
+    }
+
+    /// Extract packet to byte array
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes: Vec<u8> = vec![];
+
+        // Add packet ID
+        bytes.push(self.packet_id as u8);
+
+        // Add payload size
+        let mut payload_size = 0;
+        if self.payload != None {
+            payload_size = self.payload.as_ref().unwrap().len();
+        }
+        let bytes_payload_size = (payload_size as u32).to_be_bytes();
+        bytes.extend_from_slice(&bytes_payload_size);
+
+        // Add payload
+        if self.payload != None {
+            bytes.extend_from_slice(self.payload.as_ref().unwrap());
+        }
+
+        return bytes;
+    }
+}
+
+impl std::fmt::Display for PacketId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            PacketId::Heartbeat => "Heartbeat",
+            PacketId::HeartbeatAck => "HeartbeatAck",
+            PacketId::RequestSendReplica => "RequestSendReplica",
+            PacketId::SendReplica => "SendReplica",
+            PacketId::SendReplicaAck => "SendReplicaAck",
+            PacketId::AskIp => "AskIp",
+            PacketId::AskIpAck => "AskIpAck",
+            PacketId::RequestFromClient => "RequestFromClient",
+            PacketId::ResponseNodeIp => "ResponseNodeIp",
+            PacketId::ClientUpload => "ClientUpload",
+            PacketId::DataNodeSendData => "DataNodeSendData",
+            PacketId::ClientRequestAck => "ClientRequestAck",
+            PacketId::StateSync => "StateSync",
+            PacketId::StateSyncAck => "StateSyncAck",
+            PacketId::Notify => "Notify",
+        };
+        write!(f, "{}", s)
     }
 }
