@@ -1,3 +1,6 @@
+use crate::components::address::Address;
+use crate::components::errors::ParseError;
+
 // ================================================
 // Definition for enum and constants
 // ================================================
@@ -28,34 +31,39 @@ pub enum Request {
 }
 
 pub const BYTE_SEP_CHARACTER: u8 = 124; // byte value of character '|'
+pub const SIZE_HEADER: usize = 5;
 
 pub struct Packet {
     pub packet_id: PacketId,
     pub payload: Option<Vec<u8>>,
+
+    pub addr_sender: Option<Address>,
+    pub addr_receiver: Option<Address>,
 }
 
 // ================================================
 // Implementation
 // ================================================
+
 impl PacketId {
-    pub fn from_u8(num: u8) -> PacketId {
+    pub fn from_u8(num: u8) -> Result<PacketId, ParseError> {
         match num {
-            0 => PacketId::Heartbeat,
-            1 => PacketId::HeartbeatAck,
-            2 => PacketId::RequestSendReplica,
-            3 => PacketId::SendReplica,
-            4 => PacketId::SendReplicaAck,
-            5 => PacketId::AskIp,
-            6 => PacketId::AskIpAck,
-            7 => PacketId::RequestFromClient,
-            8 => PacketId::ResponseNodeIp,
-            9 => PacketId::ClientUpload,
-            10 => PacketId::DataNodeSendData,
-            11 => PacketId::ClientRequestAck,
-            12 => PacketId::StateSync,
-            13 => PacketId::StateSyncAck,
-            14 => PacketId::Notify,
-            _ => panic!("Incorrect PacketId: got {num}",),
+            0 => Ok(PacketId::Heartbeat),
+            1 => Ok(PacketId::HeartbeatAck),
+            2 => Ok(PacketId::RequestSendReplica),
+            3 => Ok(PacketId::SendReplica),
+            4 => Ok(PacketId::SendReplicaAck),
+            5 => Ok(PacketId::AskIp),
+            6 => Ok(PacketId::AskIpAck),
+            7 => Ok(PacketId::RequestFromClient),
+            8 => Ok(PacketId::ResponseNodeIp),
+            9 => Ok(PacketId::ClientUpload),
+            10 => Ok(PacketId::DataNodeSendData),
+            11 => Ok(PacketId::ClientRequestAck),
+            12 => Ok(PacketId::StateSync),
+            13 => Ok(PacketId::StateSyncAck),
+            14 => Ok(PacketId::Notify),
+            _ => Err(ParseError::incorrect_packet_id(num)),
         }
     }
 }
@@ -67,6 +75,7 @@ impl Packet {
     /// let packet = Packet.new(PacketId::Heartbeat, None)
     /// ```
     pub fn new(packet_id: PacketId, payload: Option<&[u8]>) -> Packet {
+        // TODO: HoangLe [Apr-28]: Modify this to create different packets
         let payload_field: Option<Vec<u8>> = match payload {
             Some(payload) => {
                 let mut vec = Vec::<u8>::new();
@@ -78,25 +87,8 @@ impl Packet {
         Packet {
             packet_id,
             payload: payload_field,
-        }
-    }
-
-    /// Create Packet from received bytes
-    pub fn from_bytes(bytes: &[u8]) -> Packet {
-        assert!(bytes.len() >= 5, "Length of bytes not greater than 5");
-        let packet_id = PacketId::from_u8(bytes[0]);
-        let payload_size = u32::from_be_bytes(bytes[1..5].try_into().expect("Incorrect length"));
-        assert!(
-            bytes.len() == (5 + payload_size) as usize,
-            "Length of bytes not equal {} ( = 1 + 4 + {})",
-            5 + payload_size,
-            payload_size
-        );
-        let mut payload = Vec::<u8>::new();
-        payload.extend_from_slice(&bytes[5..(5 + payload_size) as usize]);
-        Packet {
-            packet_id,
-            payload: Some(payload),
+            addr_sender: None,
+            addr_receiver: None,
         }
     }
 
@@ -122,6 +114,93 @@ impl Packet {
 
         return bytes;
     }
+
+    // ================================================
+    // Functions to create packets
+    // ================================================
+
+    /// Create Packet from received bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Packet, ParseError> {
+        if bytes.len() < SIZE_HEADER {
+            return Err(ParseError::incorrect_min_header_size(bytes.len()));
+        }
+
+        let packet_id = match PacketId::from_u8(bytes[0]) {
+            Ok(packet_id) => packet_id,
+            Err(e) => return Err(e),
+        };
+
+        let payload_size = u32::from_be_bytes(bytes[1..5].try_into().expect("Incorrect length")) as usize;
+        if bytes.len() != SIZE_HEADER + payload_size {
+            return Err(ParseError::mismatched_packet_size(bytes.len(), payload_size));
+        }
+
+        let mut payload = Vec::<u8>::new();
+        payload.extend_from_slice(&bytes[5..(5 + payload_size) as usize]);
+
+        Ok(Packet {
+            packet_id,
+            payload: Some(payload),
+            addr_receiver: None,
+            addr_sender: None,
+        })
+    }
+
+    pub fn create_heartbeat() -> Packet {
+        Packet {
+            packet_id: PacketId::Heartbeat,
+            payload: None,
+            addr_receiver: None,
+            addr_sender: None,
+        }
+    }
+    pub fn create_heartbeat_ack() -> Packet {
+        Packet {
+            packet_id: PacketId::HeartbeatAck,
+            payload: None,
+            addr_receiver: None,
+            addr_sender: None,
+        }
+    }
+    // pub fn create_RequestSendReplica() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_SendReplica() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_SendReplicaAck() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_AskIp() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_AskIpAck() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_RequestFromClient() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_ResponseNodeIp() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_ClientUpload() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_DataNodeSendData() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_ClientRequestAck() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_StateSync() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_StateSyncAck() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
+    // pub fn create_Notify() -> Packet {
+    //     // TODO: HoangLe [Apr-28]: Implement this
+    // }
 }
 
 impl std::fmt::Display for PacketId {

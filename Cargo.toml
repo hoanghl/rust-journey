@@ -10,3 +10,6 @@ log = "0.4.26"
 
 [build]
 target-dir = "bin/"
+
+[profile.dev]
+opt-level = 1
