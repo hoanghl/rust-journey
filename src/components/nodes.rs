@@ -3,19 +3,21 @@ use std::net::SocketAddr;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::{
-    io::{Read, Write},
+    io::Write,
     net::{TcpListener, TcpStream},
 };
 
-use crate::components::packets::{self, Packet};
+use crate::components::{
+    configs::Configs,
+    packets::{self, Packet},
+};
 
 // ================================================
 // Definition
 // ================================================
-const BUFF_LEN: usize = 1024;
 
-pub struct Node {
-    port_receiver: u32,
+pub struct Node<'a> {
+    configs: &'a Configs,
 
     sender_receiver2processor: Option<Sender<Packet>>,
     receiver_receiver2processor: Option<Receiver<Packet>>,
@@ -85,14 +87,14 @@ pub struct Node {
 //     }
 // }
 
-impl Node {
+impl<'a> Node<'a> {
     /// Create new node
-    pub fn new(port_receiver: u32) -> Node {
+    pub fn new(configs: &Configs) -> Node {
         let (sender_receiver2processor, receiver_receiver2processor) = channel::<Packet>();
         let (sender_processor2sender, receiver_processor2sender) = channel::<Packet>();
 
         Node {
-            port_receiver,
+            configs,
             sender_receiver2processor: Some(sender_receiver2processor),
             receiver_receiver2processor: Some(receiver_receiver2processor),
             sender_processor2sender: Some(sender_processor2sender),
@@ -101,13 +103,13 @@ impl Node {
     }
 
     pub fn start(&mut self) {
-        let thread1 = self.create_thread_receiver(SocketAddr::from(([127, 0, 0, 1], self.port_receiver as u16)));
+        let thread1 = self.create_thread_receiver(SocketAddr::from(([127, 0, 0, 1], self.configs.env_port_receiver)));
         let thread2 = self.create_thread_processor();
         let thread3 = self.create_thread_sender();
 
-        thread1.join();
-        thread2.join();
-        thread3.join();
+        let _ = thread1.join();
+        let _ = thread2.join();
+        let _ = thread3.join();
     }
 
     /// Create a thread dedicated for receiving incoming message
@@ -131,39 +133,25 @@ impl Node {
             log::info!("Server starts at {}", addr);
 
             for stream in listener.incoming() {
-                let mut stream = stream.unwrap();
+                match stream {
+                    Ok(mut stream) => {
+                        let packet = match Packet::from_stream(&mut stream) {
+                            Ok(packet) => packet,
+                            Err(e) => {
+                                log::error!("{}", e);
+                                continue;
+                            }
+                        };
 
-                log::info!("Receive incomming connection from: {}", stream.peer_addr().unwrap());
-
-                // Parse
-                let mut bytes = Vec::<u8>::new();
-                let mut buff: [u8; BUFF_LEN] = [0; BUFF_LEN];
-                loop {
-                    let n = stream.read(&mut buff).unwrap();
-                    if n == 0 {
-                        break;
-                    } else {
-                        bytes.extend_from_slice(&buff[0..n]);
-
-                        if n < BUFF_LEN {
-                            break;
-                        }
+                        // Send to another thread
+                        // TODO: HoangLe [Apr-28]: Handle error from this
+                        let _ = sender_receiver2processor.send(packet);
                     }
-                }
-
-                log::debug!("No. bytes read in payload: {}", bytes.len());
-
-                let packet = match packets::Packet::from_bytes(bytes.as_ref()) {
-                    Ok(packet) => packet,
                     Err(e) => {
                         log::error!("{}", e);
                         continue;
                     }
-                };
-
-                // Send to another thread
-                // TODO: HoangLe [Apr-28]: Handle error from this
-                let _ = sender_receiver2processor.send(packet);
+                }
             }
         })
     }
@@ -176,7 +164,7 @@ impl Node {
         let sender_processor2sender = self.sender_processor2sender.take().unwrap();
 
         thread::spawn(move || {
-            for received in receiver_receiver2processor.recv() {
+            for received in receiver_receiver2processor {
                 // TODO: HoangLe [Apr-28]: Process data
                 log::info!("Received packet: {}", received.packet_id);
             }
@@ -190,9 +178,9 @@ impl Node {
         let receiver_processor2sender = self.receiver_processor2sender.take().unwrap();
 
         thread::spawn(move || {
-            for packet in receiver_processor2sender.recv() {
+            for packet in receiver_processor2sender {
                 let addr_receiver = match packet.addr_receiver {
-                    Some(addr) => addr.to_str(),
+                    Some(addr) => addr,
                     None => {
                         log::error!("Field 'addr_receiver' not specified.");
                         continue;

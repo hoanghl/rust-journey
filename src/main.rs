@@ -1,69 +1,33 @@
-use components::nodes::Node;
-use dotenv::dotenv;
-// use log;
+use std::net::Ipv4Addr;
 
-use std::{
-    env,
-    // io::{BufRead, BufReader, Read},
-    // net::{TcpListener, TcpStream},
-};
+use components::{client::Client, configs::Configs, dns::DNS, nodes::Node};
 
 mod components;
 
 fn main() {
     // ================================================
-    // Intial configurations
+    // Intialize configs
     // ================================================
-    dotenv().ok();
+    let configs = Configs::initialize();
 
-    // Set up logger
-    if env::var("RUST_LOG").is_err() {
-        env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
-
-    let port_receiver = match env::var("PORT_RECEIVER") {
-        Ok(value) => value.parse::<u32>().unwrap(),
-        Err(_) => panic!("env 'PORT_RECEIVER' not existed"),
-    };
-
-    // Parse arguments
-    let args: Vec<String> = env::args().collect();
     // ================================================
     // Establish server
     // ================================================
-    Node::new(port_receiver).start();
+    match configs.args[1].as_str() {
+        "master" | "data" => {
+            Node::new(&configs).start();
+        }
+        "dns" => {
+            let mut dns = DNS::new(&configs);
 
-    // let ip = "127.0.0.1";
-    // let port = 7878;
-    // let addr = format!("{}:{}", ip, port);
-    // let listener = match TcpListener::bind(&addr) {
-    //     Ok(listener) => listener,
-    //     Err(e) => {
-    //         log::error!("Cannot bind to address: {}: {}", &addr, e);
-    //         panic!();
-    //     }
-    // };
-
-    // for result_listenner in listener.incoming() {
-    //     let stream = match result_listenner {
-    //         Ok(stream) => stream,
-    //         Err(e) => panic!("{}", e),
-    //     };
-
-    //     let a = thread::spawn(move || {
-    //
-    //         handle_connection(stream);
-    //     });
-    // }
+            // FIXME: HoangLe [May-03]: Remove the following after testing
+            dns.set_addr_master(Ipv4Addr::new(123, 111, 22, 33));
+            dns.start()
+        }
+        "client" => {
+            let client = Client::new(&configs);
+            client.ask_master_ip();
+        }
+        _ => panic!("First argument must be a valid mode"),
+    }
 }
-
-// fn handle_connection(mut stream: TcpStream) {
-//     log::info!("Connection established with: {}", stream.peer_addr().unwrap());
-
-// let mut request = String::new();
-
-// println!("Request: {}", request);
-
-// stream.write(&[0]);
-// }
