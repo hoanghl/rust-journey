@@ -1,4 +1,5 @@
 use log;
+
 use std::net::SocketAddr;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
@@ -9,7 +10,8 @@ use std::{
 
 use crate::components::{
     configs::Configs,
-    packets::{self, Packet},
+    db::{FileInfoDB, NodeInfoDB},
+    packets::{self, Packet, PacketId},
 };
 
 // ================================================
@@ -19,73 +21,21 @@ use crate::components::{
 pub struct Node<'a> {
     configs: &'a Configs,
 
+    // Use for communicating among threads inside node
     sender_receiver2processor: Option<Sender<Packet>>,
     receiver_receiver2processor: Option<Receiver<Packet>>,
     sender_processor2sender: Option<Sender<Packet>>,
     receiver_processor2sender: Option<Receiver<Packet>>,
-}
 
-// struct Worker<T> {
-//     sender_main2worker: Option<Sender<T>>,
-//     rcv_main2worker: Option<Receiver<T>>,
-//     sender_worker2main: Option<Sender<T>>,
-//     rcv_worker2main: Option<Receiver<T>>,
-//     worker: Option<JoinHandle<()>>,
-// }
+    // For data management
+    // TODO: HoangLe [May-12]: Store node and file info into these db
+    node_info: NodeInfoDB,
+    data_info: FileInfoDB,
+}
 
 // ================================================
 // Implementation
 // ================================================
-
-// fn handle_connection(stream: &mut TcpStream) {
-//     let mut bytes = Vec::<u8>::new();
-//     let mut buff: [u8; BUFF_LEN] = [0; BUFF_LEN];
-//     loop {
-//         let n = stream.read(&mut buff).unwrap();
-//         if n == 0 {
-//             break;
-//         } else {
-//             bytes.extend_from_slice(&buff[0..n]);
-
-//             if n < BUFF_LEN {
-//                 break;
-//             }
-//         }
-//     }
-
-//     log::debug!("No. bytes read in payload: {}", bytes.len());
-
-//     let packet = packets::Packet::from_bytes(bytes.as_ref());
-
-//     log::debug!("Parse packet: {}", packet.packet_id);
-// }
-
-// impl Worker<Packet> {
-//     pub fn new() -> Worker<Packet> {
-//         let (sender_main2worker, rcv_main2worker) = channel::<Packet>();
-//         let (sender_worker2main, rcv_worker2main) = channel::<Packet>();
-
-//         Worker {
-//             sender_main2worker: Some(sender_main2worker),
-//             rcv_main2worker: Some(rcv_main2worker),
-//             sender_worker2main: Some(sender_worker2main),
-//             rcv_worker2main: Some(rcv_worker2main),
-//             worker: None,
-//         }
-//     }
-
-//     pub fn start(&mut self, f: fn(Sender<Packet>, Receiver<Packet>)) {
-//         let sender_worker2main = self.sender_worker2main.take().unwrap();
-//         let rcv_main2worker = self.rcv_main2worker.take().unwrap();
-//         self.worker = Some(thread::spawn(move || f(sender_worker2main, rcv_main2worker)));
-//     }
-
-//     pub fn get(&self) {
-//         for received in self.rcv_worker2main.as_ref().unwrap() {
-//             println!("{}", received.packet_id);
-//         }
-//     }
-// }
 
 impl<'a> Node<'a> {
     /// Create new node
@@ -99,6 +49,8 @@ impl<'a> Node<'a> {
             receiver_receiver2processor: Some(receiver_receiver2processor),
             sender_processor2sender: Some(sender_processor2sender),
             receiver_processor2sender: Some(receiver_processor2sender),
+            node_info: NodeInfoDB::intialize("node_info"),
+            data_info: FileInfoDB::intialize("file_info"),
         }
     }
 
@@ -161,12 +113,24 @@ impl<'a> Node<'a> {
         log::info!("Creating thread: Processor");
 
         let receiver_receiver2processor = self.receiver_receiver2processor.take().unwrap();
-        let sender_processor2sender = self.sender_processor2sender.take().unwrap();
+        let sender_processor2sender = self.sender_processor2sender.take().unwrap().clone();
 
         thread::spawn(move || {
-            for received in receiver_receiver2processor {
-                // TODO: HoangLe [Apr-28]: Process data
-                log::info!("Received packet: {}", received.packet_id);
+            for packet in receiver_receiver2processor {
+                log::debug!("Received: {}", packet);
+
+                match packet.packet_id {
+                    PacketId::Heartbeat => {
+                        // TODO: HoangLe [May-03]: Send Heartbeat ACK
+                    }
+                    PacketId::HeartbeatAck => {
+                        // TODO: HoangLe [May-03]: Record the healthy status
+                    }
+                    _ => {
+                        log::error!("Unsupported packet type: {}", packet);
+                        continue;
+                    }
+                }
             }
         })
     }
@@ -202,19 +166,6 @@ impl<'a> Node<'a> {
             }
         })
     }
-
-    // fn handler_receiver() {
-    //     loop {
-    //         let packet = Packet::new(packets::PacketId::Heartbeat, None);
-
-    //         if let Err(_) = sender_worker2main.send(packet) {
-    //             panic!();
-    //         };
-    //         // thread::sleep(Duration::from_millis(5));
-    //     }
-    // }
-
-    // C
 
     // pub fn connect() {
     //     // TODO: HoangLe [Apr-13]: Implement this
