@@ -1,19 +1,13 @@
 use std::convert::From;
 
+use crate::components::entity::node_roles::Role;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, Result};
 use std::{net::Ipv4Addr, str::FromStr};
+
 // ================================================
 // Definitions for DB entry
 // ================================================
-#[rustfmt::skip]
-#[repr(u8)]
-pub enum Role {
-    Default = 0,
-    Master  = 1,
-    Data    = 2,
-    DNS     = 3,
-}
 
 pub struct FileInfoEntry {
     pub filename: String,
@@ -33,27 +27,6 @@ struct NodeInfoEntry {
 // ================================================
 // Implementations
 // ================================================
-impl From<u8> for Role {
-    fn from(value: u8) -> Self {
-        match value {
-            1 => Role::Master,
-            2 => Role::Data,
-            3 => Role::DNS,
-            _ => panic!("Error as parsing to enum Role: value = {}", value),
-        }
-    }
-}
-
-impl From<&Role> for u8 {
-    fn from(value: &Role) -> Self {
-        match value {
-            Role::Master => 1,
-            Role::Data => 2,
-            Role::DNS => 3,
-            _ => panic!("Error as parsing from enum Role"),
-        }
-    }
-}
 
 impl FileInfoEntry {
     pub fn initialize(filename: String, is_local: bool, path: Option<String>, node_id: String) -> FileInfoEntry {

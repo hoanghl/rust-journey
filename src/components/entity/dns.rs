@@ -7,7 +7,7 @@ use crate::components::{
 use log;
 use std::{
     io::Write,
-    net::{Ipv4Addr, SocketAddr, TcpListener},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
 };
 
 // ================================================
@@ -31,6 +31,7 @@ impl<'a> DNS<'a> {
     }
 
     pub fn set_addr_master(&mut self, addr_master: Ipv4Addr) {
+        // TODO: HoangLe [May-13]: Call this when new Master notifies
         self.addr_master = Some(addr_master);
     }
 
@@ -41,7 +42,7 @@ impl<'a> DNS<'a> {
         return self.addr_master.as_ref();
     }
 
-    pub fn start(self) {
+    pub fn start(&mut self) {
         let addr = SocketAddr::new(
             std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             self.configs.env_port_dns,
@@ -63,6 +64,13 @@ impl<'a> DNS<'a> {
                     continue;
                 }
             };
+            let addr_sender = match stream.peer_addr() {
+                Ok(addr) => addr,
+                Err(err) => {
+                    log::error!("Cannot extract sender address: {}", err);
+                    continue;
+                }
+            };
 
             // Parse stream
             let packet = match Packet::from_stream(&mut stream) {
@@ -76,9 +84,16 @@ impl<'a> DNS<'a> {
             // Process request
             match packet.packet_id {
                 PacketId::AskIp => {
-                    let packet_reply = Packet::create_ask_ip_ack(self.get_addr_master());
+                    let packet_reply = Packet::create_ask_ip_ack(addr_sender, self.get_addr_master());
 
-                    let _ = stream.write_all(packet_reply.to_bytes().as_slice());
+                    if let Err(err) = stream.write_all(packet_reply.to_bytes().as_slice()) {
+                        log::error!("Error as writing AskIp: {}", err);
+                    }
+                }
+                PacketId::Notify => {
+                    if let IpAddr::V4(ip) = addr_sender.ip() {
+                        self.set_addr_master(ip);
+                    }
                 }
                 _ => {
                     log::error!(

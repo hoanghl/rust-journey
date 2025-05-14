@@ -7,6 +7,8 @@ use std::{
 
 use crate::components::errors::ParseError;
 
+use super::entity::node_roles::Role;
+
 // ================================================
 // Definition for enum and constants
 // ================================================
@@ -45,9 +47,6 @@ pub struct Packet {
 
     // Attributes dedicated for sending
     pub payload: Option<Vec<u8>>,
-
-    // Attributed parsed while receiving
-    pub ip_master: Option<Ipv4Addr>,
 }
 
 // ================================================
@@ -57,7 +56,7 @@ pub struct Packet {
 impl From<u8> for PacketId {
     fn from(value: u8) -> Self {
         match value {
-            0 => PacketId::Heartbeat,
+            0 => PacketId::Default,
             1 => PacketId::Heartbeat,
             2 => PacketId::HeartbeatAck,
             3 => PacketId::RequestSendReplica,
@@ -74,6 +73,29 @@ impl From<u8> for PacketId {
             14 => PacketId::StateSyncAck,
             15 => PacketId::Notify,
             _ => panic!("Error as parsing to enum PacketId: value = {}", value),
+        }
+    }
+}
+
+impl From<PacketId> for u8 {
+    fn from(value: PacketId) -> Self {
+        match value {
+            PacketId::Default => 0,
+            PacketId::Heartbeat => 1,
+            PacketId::HeartbeatAck => 2,
+            PacketId::RequestSendReplica => 3,
+            PacketId::SendReplica => 4,
+            PacketId::SendReplicaAck => 5,
+            PacketId::AskIp => 6,
+            PacketId::AskIpAck => 7,
+            PacketId::RequestFromClient => 8,
+            PacketId::ResponseNodeIp => 9,
+            PacketId::ClientUpload => 10,
+            PacketId::DataNodeSendData => 11,
+            PacketId::ClientRequestAck => 12,
+            PacketId::StateSync => 13,
+            PacketId::StateSyncAck => 14,
+            PacketId::Notify => 15,
         }
     }
 }
@@ -133,31 +155,17 @@ impl Default for Packet {
             payload: None,
             addr_sender: None,
             addr_receiver: None,
-            ip_master: None,
         }
     }
 }
 
 impl Packet {
-    /// Creates Packet from already known packetId and payload.
-    /// # Example
-    /// ```rust
-    /// let packet = Packet.new(PacketId::Heartbeat, None)
-    /// ```
-    pub fn new(packet_id: PacketId, payload: Option<Vec<u8>>) -> Packet {
-        Packet {
-            packet_id,
-            payload,
-            ..Default::default()
-        }
-    }
-
     /// Extract packet to byte array
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes: Vec<u8> = vec![];
 
         // Add packet ID
-        bytes.push(self.packet_id as u8);
+        bytes.push(u8::from(self.packet_id));
 
         // Add payload size
         let mut payload_size = 0;
@@ -203,6 +211,10 @@ impl Packet {
 
         log::debug!("Total bytes received: {}", bytes.len());
 
+        for byte in &bytes {
+            log::debug!("Received byte: {}", byte);
+        }
+
         // ================================================
         // Parse header
         // ================================================
@@ -226,7 +238,11 @@ impl Packet {
         let mut payload = Vec::<u8>::new();
         payload.extend_from_slice(&bytes[5..(5 + payload_size) as usize]);
 
-        let mut packet = Packet::new(packet_id, None);
+        let mut packet = Packet {
+            packet_id,
+            ..Default::default()
+        };
+
         match packet_id {
             PacketId::Heartbeat => {}
             PacketId::HeartbeatAck => {}
@@ -245,7 +261,7 @@ impl Packet {
                     return Err(ParseError::unavailable_master_ip());
                 }
                 4 => {
-                    packet.ip_master = Some(Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]));
+                    packet.addr_sender = Some(stream.peer_addr().unwrap());
                 }
                 _ => {
                     return Err(ParseError::incorrect_payload_size_ask_ip_ack(payload.len()));
@@ -285,15 +301,17 @@ impl Packet {
         return Ok(packet);
     }
 
-    pub fn create_heartbeat() -> Packet {
+    pub fn create_heartbeat(addr_receiver: SocketAddr) -> Packet {
         Packet {
             packet_id: PacketId::Heartbeat,
+            addr_receiver: Some(addr_receiver),
             ..Default::default()
         }
     }
-    pub fn create_heartbeat_ack() -> Packet {
+    pub fn create_heartbeat_ack(addr_receiver: SocketAddr) -> Packet {
         Packet {
             packet_id: PacketId::HeartbeatAck,
+            addr_receiver: Some(addr_receiver),
             ..Default::default()
         }
     }
@@ -306,11 +324,19 @@ impl Packet {
     // pub fn create_SendReplicaAck() -> Packet {
     //     // TODO: HoangLe [Apr-28]: Implement this
     // }
-    pub fn create_ask_ip() -> Packet {
-        Packet::new(PacketId::AskIp, None)
+    pub fn create_ask_ip(addr_receiver: SocketAddr) -> Packet {
+        Packet {
+            packet_id: PacketId::AskIp,
+            addr_receiver: Some(addr_receiver),
+            ..Default::default()
+        }
     }
-    pub fn create_ask_ip_ack(addr_master: Option<&Ipv4Addr>) -> Packet {
-        let mut packet = Packet::new(PacketId::AskIpAck, None);
+    pub fn create_ask_ip_ack(addr_receiver: SocketAddr, addr_master: Option<&Ipv4Addr>) -> Packet {
+        let mut packet = Packet {
+            packet_id: PacketId::AskIpAck,
+            addr_receiver: Some(addr_receiver),
+            ..Default::default()
+        };
         match addr_master {
             Some(addr_master) => {
                 let payload = addr_master.octets().to_vec();
@@ -342,12 +368,39 @@ impl Packet {
     // pub fn create_StateSyncAck() -> Packet {
     //     // TODO: HoangLe [Apr-28]: Implement this
     // }
-    // pub fn create_Notify() -> Packet {
-    //     // TODO: HoangLe [Apr-28]: Implement this
-    // }
+    pub fn create_notify(addr_receiver: SocketAddr, role: &Role) -> Packet {
+        let mut packet = Packet {
+            packet_id: PacketId::Notify,
+            addr_receiver: Some(addr_receiver),
+            ..Default::default()
+        };
+        match role {
+            Role::Data => {
+                packet.payload = Some(Vec::<u8>::from([1]));
+            }
+            Role::Master => {
+                packet.payload = Some(Vec::<u8>::from([0]));
+            }
+            _ => {
+                panic!("Invalid role: Must be either Data or Master, got: {}", u8::from(role));
+            }
+        }
+
+        packet
+    }
 }
 
 impl fmt::Display for Packet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let addr_sender = match self.addr_sender {
+            Some(addr_sender) => format!("{}", addr_sender),
+            None => String::from("None"),
+        };
+        write!(f, "Packet: packet_id: {}, addr_sender: {}", self.packet_id, addr_sender)
+    }
+}
+
+impl fmt::Debug for Packet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let addr_sender = match self.addr_sender {
             Some(addr_sender) => format!("{}", addr_sender),

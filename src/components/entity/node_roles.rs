@@ -1,0 +1,36 @@
+// ================================================
+// Definition
+// ================================================
+
+#[rustfmt::skip]
+#[repr(u8)]
+pub enum Role {
+    Default = 0,
+    Master  = 1,
+    Data    = 2,
+    DNS     = 3,
+}
+// ================================================
+// Implementations
+// ================================================
+impl From<u8> for Role {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => Role::Master,
+            2 => Role::Data,
+            3 => Role::DNS,
+            _ => panic!("Error as parsing to enum Role: value = {}", value),
+        }
+    }
+}
+
+impl From<&Role> for u8 {
+    fn from(value: &Role) -> Self {
+        match value {
+            Role::Master => 1,
+            Role::Data => 2,
+            Role::DNS => 3,
+            _ => panic!("Error as parsing from enum Role"),
+        }
+    }
+}

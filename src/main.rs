@@ -1,6 +1,7 @@
-use std::net::Ipv4Addr;
-
-use components::{client::Client, configs::Configs, dns::DNS, nodes::Node};
+use components::{
+    configs::Configs,
+    entity::{client::Client, dns::DNS, node_roles::Role, nodes::Node},
+};
 
 mod components;
 
@@ -14,14 +15,16 @@ fn main() {
     // Establish server
     // ================================================
     match configs.args[1].as_str() {
-        "master" | "data" => {
-            Node::new(&configs).start();
+        "master" => {
+            let mut node = Node::new(&configs, Role::Master);
+            node.start();
+        }
+        "data" => {
+            let mut node = Node::new(&configs, Role::Data);
+            node.start();
         }
         "dns" => {
             let mut dns = DNS::new(&configs);
-
-            // FIXME: HoangLe [May-03]: Remove the following after testing
-            dns.set_addr_master(Ipv4Addr::new(123, 111, 22, 33));
             dns.start()
         }
         "client" => {

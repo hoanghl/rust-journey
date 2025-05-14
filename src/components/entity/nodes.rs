@@ -1,6 +1,6 @@
 use log;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::{
@@ -10,7 +10,8 @@ use std::{
 
 use crate::components::{
     configs::Configs,
-    db::{FileInfoDB, NodeInfoDB},
+    // db::{FileInfoDB, NodeInfoDB},
+    entity::node_roles::Role,
     packets::{self, Packet, PacketId},
 };
 
@@ -20,17 +21,17 @@ use crate::components::{
 
 pub struct Node<'a> {
     configs: &'a Configs,
+    role: Role,
 
     // Use for communicating among threads inside node
-    sender_receiver2processor: Option<Sender<Packet>>,
-    receiver_receiver2processor: Option<Receiver<Packet>>,
-    sender_processor2sender: Option<Sender<Packet>>,
-    receiver_processor2sender: Option<Receiver<Packet>>,
-
+    pub sender_receiver2processor: Option<Sender<Packet>>,
+    pub receiver_receiver2processor: Option<Receiver<Packet>>,
+    pub sender_processor2sender: Option<Sender<Packet>>,
+    pub receiver_processor2sender: Option<Receiver<Packet>>,
     // For data management
     // TODO: HoangLe [May-12]: Store node and file info into these db
-    node_info: NodeInfoDB,
-    data_info: FileInfoDB,
+    // node_info: NodeInfoDB,
+    // data_info: FileInfoDB,
 }
 
 // ================================================
@@ -39,29 +40,52 @@ pub struct Node<'a> {
 
 impl<'a> Node<'a> {
     /// Create new node
-    pub fn new(configs: &Configs) -> Node {
+    pub fn new(configs: &Configs, role: Role) -> Node {
         let (sender_receiver2processor, receiver_receiver2processor) = channel::<Packet>();
         let (sender_processor2sender, receiver_processor2sender) = channel::<Packet>();
 
         Node {
             configs,
+            role,
             sender_receiver2processor: Some(sender_receiver2processor),
             receiver_receiver2processor: Some(receiver_receiver2processor),
             sender_processor2sender: Some(sender_processor2sender),
             receiver_processor2sender: Some(receiver_processor2sender),
-            node_info: NodeInfoDB::intialize("node_info"),
-            data_info: FileInfoDB::intialize("file_info"),
+            // node_info: NodeInfoDB::intialize("node_info"),
+            // data_info: FileInfoDB::intialize("file_info"),
         }
     }
 
     pub fn start(&mut self) {
-        let thread1 = self.create_thread_receiver(SocketAddr::from(([127, 0, 0, 1], self.configs.env_port_receiver)));
-        let thread2 = self.create_thread_processor();
-        let thread3 = self.create_thread_sender();
+        let thread_receiver =
+            self.create_thread_receiver(SocketAddr::from(([127, 0, 0, 1], self.configs.env_port_receiver)));
+        let thread_processor = self.create_thread_processor();
+        let thread_sender = self.create_thread_sender();
 
-        let _ = thread1.join();
-        let _ = thread2.join();
-        let _ = thread3.join();
+        // Send its IP to DNS
+        let addr_dns = SocketAddr::new(IpAddr::V4(self.configs.env_ip_dns), self.configs.env_port_dns);
+
+        if let Err(err) = self
+            .sender_processor2sender
+            .as_ref()
+            .unwrap()
+            .send(Packet::create_notify(addr_dns, &self.role))
+        {
+            log::error!("Error as sending Notify: {}", err);
+        }
+
+        if let Err(err) = thread_receiver.join() {
+            log::error!("Error as creating thread_receiver: {:?}", err);
+            return;
+        }
+        if let Err(err) = thread_processor.join() {
+            log::error!("Error as creating thread_processor: {:?}", err);
+            return;
+        }
+        if let Err(err) = thread_sender.join() {
+            log::error!("Error as creating thread_sender: {:?}", err);
+            return;
+        }
     }
 
     /// Create a thread dedicated for receiving incoming message
@@ -113,7 +137,7 @@ impl<'a> Node<'a> {
         log::info!("Creating thread: Processor");
 
         let receiver_receiver2processor = self.receiver_receiver2processor.take().unwrap();
-        let sender_processor2sender = self.sender_processor2sender.take().unwrap().clone();
+        let sender_processor2sender = self.sender_processor2sender.as_ref().unwrap().clone();
 
         thread::spawn(move || {
             for packet in receiver_receiver2processor {
@@ -153,10 +177,15 @@ impl<'a> Node<'a> {
 
                 match TcpStream::connect(&addr_receiver) {
                     Ok(mut stream) => {
-                        let packet = packets::Packet::new(packets::PacketId::Heartbeat, None);
                         let a = packet.to_bytes();
-                        if let Err(e) = stream.write_all(a.as_slice()) {
-                            log::error!("Cannot send to address: {} : {}", &addr_receiver, e);
+
+                        match stream.write_all(a.as_slice()) {
+                            Ok(_) => {
+                                log::debug!("Write sucessfully");
+                            }
+                            Err(e) => {
+                                log::error!("Cannot send to address: {} : {}", &addr_receiver, e);
+                            }
                         }
                     }
                     Err(_) => {
@@ -166,8 +195,4 @@ impl<'a> Node<'a> {
             }
         })
     }
-
-    // pub fn connect() {
-    //     // TODO: HoangLe [Apr-13]: Implement this
-    // }
 }
