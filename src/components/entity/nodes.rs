@@ -1,6 +1,6 @@
 use log;
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::{
@@ -12,15 +12,16 @@ use crate::components::{
     configs::Configs,
     // db::{FileInfoDB, NodeInfoDB},
     entity::node_roles::Role,
-    packets::{self, Packet, PacketId},
+    errors::{NodeCreationError, NodeCreationErrorCode},
+    packets::{Packet, PacketId},
 };
 
 // ================================================
 // Definition
 // ================================================
 
-pub struct Node<'a> {
-    configs: &'a Configs,
+pub struct Node {
+    configs: Configs,
     role: Role,
 
     // Use for communicating among threads inside node
@@ -38,9 +39,9 @@ pub struct Node<'a> {
 // Implementation
 // ================================================
 
-impl<'a> Node<'a> {
+impl Node {
     /// Create new node
-    pub fn new(configs: &Configs, role: Role) -> Node {
+    pub fn new(configs: Configs, role: Role) -> Node {
         let (sender_receiver2processor, receiver_receiver2processor) = channel::<Packet>();
         let (sender_processor2sender, receiver_processor2sender) = channel::<Packet>();
 
@@ -57,22 +58,35 @@ impl<'a> Node<'a> {
     }
 
     pub fn start(&mut self) {
+        // ================================================
+        // Declare different threads for different functions
+        // ================================================
         let thread_receiver =
-            self.create_thread_receiver(SocketAddr::from(([127, 0, 0, 1], self.configs.env_port_receiver)));
-        let thread_processor = self.create_thread_processor();
-        let thread_sender = self.create_thread_sender();
+            match self.create_thread_receiver(SocketAddr::from(([127, 0, 0, 1], self.configs.env_port_receiver))) {
+                Ok(handle) => handle,
+                Err(err) => {
+                    log::error!("{}", err);
+                    return;
+                }
+            };
+        let thread_processor = match self.create_thread_processor() {
+            Ok(handle) => handle,
+            Err(err) => {
+                log::error!("{}", err);
+                return;
+            }
+        };
+        let thread_sender = match self.create_thread_sender() {
+            Ok(handle) => handle,
+            Err(err) => {
+                log::error!("{}", err);
+                return;
+            }
+        };
 
-        // Send its IP to DNS
-        let addr_dns = SocketAddr::new(IpAddr::V4(self.configs.env_ip_dns), self.configs.env_port_dns);
-
-        if let Err(err) = self
-            .sender_processor2sender
-            .as_ref()
-            .unwrap()
-            .send(Packet::create_notify(addr_dns, &self.role))
-        {
-            log::error!("Error as sending Notify: {}", err);
-        }
+        // ================================================
+        // Join threads
+        // ================================================
 
         if let Err(err) = thread_receiver.join() {
             log::error!("Error as creating thread_receiver: {:?}", err);
@@ -89,16 +103,12 @@ impl<'a> Node<'a> {
     }
 
     /// Create a thread dedicated for receiving incoming message
-    fn create_thread_receiver(&mut self, addr: SocketAddr) -> JoinHandle<()> {
+    fn create_thread_receiver(&mut self, addr: SocketAddr) -> Result<JoinHandle<()>, NodeCreationError> {
         log::info!("Creating thread: Receiver");
-
-        // let mut worker_receiver = Worker::<packets::Packet>::new();
-        // worker_receiver.start(Node::receiver);
-        // worker_receiver.get();
 
         let sender_receiver2processor = self.sender_receiver2processor.take().unwrap();
 
-        thread::spawn(move || {
+        Ok(thread::spawn(move || {
             let listener = match TcpListener::bind(&addr) {
                 Ok(listener) => listener,
                 Err(_) => {
@@ -119,9 +129,13 @@ impl<'a> Node<'a> {
                             }
                         };
 
-                        // Send to another thread
-                        // TODO: HoangLe [Apr-28]: Handle error from this
-                        let _ = sender_receiver2processor.send(packet);
+                        // Send to thread Processor
+                        if let Err(err) = sender_receiver2processor.send(packet) {
+                            log::error!(
+                                "Error as sending packet from thread:Receiver -> thread:Processor: err = {}",
+                                err
+                            );
+                        };
                     }
                     Err(e) => {
                         log::error!("{}", e);
@@ -129,17 +143,65 @@ impl<'a> Node<'a> {
                     }
                 }
             }
-        })
+        }))
     }
 
     /// Create a thread dedicated for processing message
-    fn create_thread_processor(&mut self) -> JoinHandle<()> {
+    fn create_thread_processor(&mut self) -> Result<JoinHandle<()>, NodeCreationError> {
         log::info!("Creating thread: Processor");
 
         let receiver_receiver2processor = self.receiver_receiver2processor.take().unwrap();
         let sender_processor2sender = self.sender_processor2sender.as_ref().unwrap().clone();
+        let env_port_receiver = self.configs.env_port_receiver;
+        let addr_dns = SocketAddr::new(IpAddr::V4(self.configs.env_ip_dns), self.configs.env_port_dns);
+        let role = self.role;
 
-        thread::spawn(move || {
+        // ================================================
+        // Execute 1st step of Initial procedure based on node's role
+        // ================================================
+
+        match self.role {
+            Role::Master => {
+                // Send its IP to DNS
+                if let Err(err) = self
+                    .sender_processor2sender
+                    .as_ref()
+                    .unwrap()
+                    .send(Packet::create_notify(addr_dns.clone(), &self.role))
+                {
+                    log::error!("Error as sending Notify: {}", err);
+                    return Err(NodeCreationError {
+                        error_code: NodeCreationErrorCode::ProcessorThreadErr,
+                    });
+                }
+            }
+            Role::Data => {
+                // Ask Master IP from DNS and notify to current master
+
+                if let Err(err) = self
+                    .sender_processor2sender
+                    .as_ref()
+                    .unwrap()
+                    .send(Packet::create_ask_ip(addr_dns))
+                {
+                    log::error!("Error as sending AskIP: {}", err);
+                    return Err(NodeCreationError {
+                        error_code: NodeCreationErrorCode::ProcessorThreadErr,
+                    });
+                }
+            }
+            _ => {
+                log::error!(
+                    "Only Role::Master and Role::Data allow. This node has invalid role: {}",
+                    self.role
+                );
+            }
+        }
+
+        // ================================================
+        // Start processing loop
+        // ================================================
+        Ok(thread::spawn(move || {
             for packet in receiver_receiver2processor {
                 log::debug!("Received: {}", packet);
 
@@ -150,22 +212,36 @@ impl<'a> Node<'a> {
                     PacketId::HeartbeatAck => {
                         // TODO: HoangLe [May-03]: Record the healthy status
                     }
+                    PacketId::AskIpAck => {
+                        let payload = packet.payload.as_ref().unwrap();
+                        let addr_master = SocketAddr::new(
+                            IpAddr::V4(Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3])),
+                            env_port_receiver,
+                        );
+
+                        log::info!("Addr master: {}", addr_master);
+
+                        if let Err(err) = sender_processor2sender.send(Packet::create_notify(addr_master, &role)) {
+                            log::error!("Err as sending from thread:Processor -> thread:Sender: {}", err);
+                            continue;
+                        };
+                    }
                     _ => {
                         log::error!("Unsupported packet type: {}", packet);
                         continue;
                     }
                 }
             }
-        })
+        }))
     }
 
     /// Create thread for sending packet
-    fn create_thread_sender(&mut self) -> JoinHandle<()> {
+    fn create_thread_sender(&mut self) -> Result<JoinHandle<()>, NodeCreationError> {
         log::info!("Creating thread: Sender");
 
         let receiver_processor2sender = self.receiver_processor2sender.take().unwrap();
 
-        thread::spawn(move || {
+        Ok(thread::spawn(move || {
             for packet in receiver_processor2sender {
                 let addr_receiver = match packet.addr_receiver {
                     Some(addr) => addr,
@@ -175,24 +251,20 @@ impl<'a> Node<'a> {
                     }
                 };
 
-                match TcpStream::connect(&addr_receiver) {
-                    Ok(mut stream) => {
-                        let a = packet.to_bytes();
-
-                        match stream.write_all(a.as_slice()) {
-                            Ok(_) => {
-                                log::debug!("Write sucessfully");
-                            }
-                            Err(e) => {
-                                log::error!("Cannot send to address: {} : {}", &addr_receiver, e);
-                            }
-                        }
-                    }
+                // Connect and send
+                let mut stream = match TcpStream::connect(&addr_receiver) {
+                    Ok(stream) => stream,
                     Err(_) => {
-                        log::error!("Cannot connect to address: {}", addr_receiver)
+                        log::error!("Cannot connect to address: {}", addr_receiver);
+                        continue;
                     }
+                };
+
+                let a = packet.to_bytes();
+                if let Err(err) = stream.write_all(a.as_slice()) {
+                    log::error!("Cannot send to address: {} : {}", &addr_receiver, err);
                 }
             }
-        })
+        }))
     }
 }

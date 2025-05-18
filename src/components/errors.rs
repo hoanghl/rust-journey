@@ -13,6 +13,7 @@ pub enum ParseErrorCode {
     MismatchedPacketSize,
     UnavailableMasterAddress,
     IncorrectPayloadSizeAskIPAck,
+    StreamReadingError,
 }
 
 pub struct ParseError {
@@ -33,6 +34,7 @@ impl std::fmt::Display for ParseErrorCode {
             ParseErrorCode::MismatchedPacketSize => "MismatchedPacketSize",
             ParseErrorCode::UnavailableMasterAddress => "UnavailableMasterAddress",
             ParseErrorCode::IncorrectPayloadSizeAskIPAck => "IncorrectPayloadSizeAskIPAck",
+            ParseErrorCode::StreamReadingError => "StreamReading",
         };
         write!(f, "{}", s)
     }
@@ -106,6 +108,12 @@ impl ParseError {
 
         err.payload_size = Some(payload_size);
 
+        err
+    }
+
+    pub fn stream_reading_err() -> ParseError {
+        let mut err = ParseError::create_instance();
+        err.error_code = ParseErrorCode::StreamReadingError;
         err
     }
 }

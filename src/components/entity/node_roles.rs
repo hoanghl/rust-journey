@@ -4,6 +4,7 @@
 
 #[rustfmt::skip]
 #[repr(u8)]
+#[derive(Clone, Copy)]
 pub enum Role {
     Default = 0,
     Master  = 1,
@@ -32,5 +33,17 @@ impl From<&Role> for u8 {
             Role::DNS => 3,
             _ => panic!("Error as parsing from enum Role"),
         }
+    }
+}
+
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Role::Default => "Default",
+            Role::Master => "Master",
+            Role::Data => "Data",
+            Role::DNS => "DNS",
+        };
+        write!(f, "{}", s)
     }
 }

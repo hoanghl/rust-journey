@@ -22,7 +22,7 @@ impl Configs {
                 .expect("Cannot parse env 'IP_DNS' to correct IP address format"),
             Err(_) => panic!("env 'IP_DNS' not existed"),
         };
-        let port_receiver = match env::var("PORT_RECEIVER") {
+        let mut port_receiver = match env::var("PORT_RECEIVER") {
             Ok(value) => value.parse::<u16>().unwrap(),
             Err(_) => panic!("env 'PORT_RECEIVER' not existed"),
         };
@@ -40,6 +40,19 @@ impl Configs {
             env::set_var("RUST_LOG", "info");
         }
         env_logger::init();
+
+        // Override some config
+        if args.len() >= 3 {
+            match args[2].parse::<u16>() {
+                Ok(port) => {
+                    log::info!("'port' argument specified. Override the default value.");
+                    port_receiver = port;
+                }
+                Err(_) => {
+                    log::error!("2nd argument specified but not valid port value: {}", args[2]);
+                }
+            }
+        }
 
         Configs {
             env_ip_dns: ip_dns,

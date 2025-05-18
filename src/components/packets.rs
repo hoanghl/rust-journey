@@ -18,7 +18,7 @@ const SIZE_HEADER: usize = 5;
 const BUFF_LEN: usize = 1024;
 
 #[rustfmt::skip]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PacketId {
     Default                 = 0,
@@ -159,6 +159,26 @@ impl Default for Packet {
     }
 }
 
+impl fmt::Display for Packet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let addr_sender = match self.addr_sender {
+            Some(addr_sender) => format!("{}", addr_sender),
+            None => String::from("None"),
+        };
+        write!(f, "Packet: packet_id: {}, addr_sender: {}", self.packet_id, addr_sender)
+    }
+}
+
+impl fmt::Debug for Packet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let addr_sender = match self.addr_sender {
+            Some(addr_sender) => format!("{}", addr_sender),
+            None => String::from("None"),
+        };
+        write!(f, "Packet: packet_id: {}, addr_sender: {}", self.packet_id, addr_sender)
+    }
+}
+
 impl Packet {
     /// Extract packet to byte array
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -261,7 +281,12 @@ impl Packet {
                     return Err(ParseError::unavailable_master_ip());
                 }
                 4 => {
-                    packet.addr_sender = Some(stream.peer_addr().unwrap());
+                    let mut buff = Vec::with_capacity(payload_size);
+                    if let Err(err) = stream.read_exact(&mut buff) {
+                        log::error!("Err as reading bytes for payload: {}", err);
+                        return Err(ParseError::stream_reading_err());
+                    }
+                    // packet.payload = vec![];
                 }
                 _ => {
                     return Err(ParseError::incorrect_payload_size_ask_ip_ack(payload.len()));
@@ -387,25 +412,5 @@ impl Packet {
         }
 
         packet
-    }
-}
-
-impl fmt::Display for Packet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let addr_sender = match self.addr_sender {
-            Some(addr_sender) => format!("{}", addr_sender),
-            None => String::from("None"),
-        };
-        write!(f, "Packet: packet_id: {}, addr_sender: {}", self.packet_id, addr_sender)
-    }
-}
-
-impl fmt::Debug for Packet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let addr_sender = match self.addr_sender {
-            Some(addr_sender) => format!("{}", addr_sender),
-            None => String::from("None"),
-        };
-        write!(f, "Packet: packet_id: {}, addr_sender: {}", self.packet_id, addr_sender)
     }
 }
