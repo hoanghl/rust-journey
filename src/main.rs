@@ -1,6 +1,6 @@
 use components::{
     configs::Configs,
-    entity::{client::Client, dns::DNS, node_roles::Role, nodes::Node},
+    entity::{client::Client, node_roles::Role, nodes::Node},
 };
 
 mod components;
@@ -24,8 +24,8 @@ fn main() {
             node.start();
         }
         "dns" => {
-            let mut dns = DNS::new(&configs);
-            dns.start()
+            let mut node = Node::new(configs, Role::DNS);
+            node.start()
         }
         "client" => {
             let client = Client::new(&configs);

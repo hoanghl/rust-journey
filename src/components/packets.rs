@@ -47,6 +47,9 @@ pub struct Packet {
 
     // Attributes dedicated for sending
     pub payload: Option<Vec<u8>>,
+
+    // Attributes parsed from payload
+    pub ip_master: Option<Ipv4Addr>,
 }
 
 // ================================================
@@ -155,6 +158,7 @@ impl Default for Packet {
             payload: None,
             addr_sender: None,
             addr_receiver: None,
+            ip_master: None,
         }
     }
 }
@@ -286,7 +290,10 @@ impl Packet {
                         log::error!("Err as reading bytes for payload: {}", err);
                         return Err(ParseError::stream_reading_err());
                     }
-                    // packet.payload = vec![];
+                    packet.payload = Some(buff);
+
+                    // Parse addr's Master from payload
+                    packet.ip_master = Some(Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]));
                 }
                 _ => {
                     return Err(ParseError::incorrect_payload_size_ask_ip_ack(payload.len()));
