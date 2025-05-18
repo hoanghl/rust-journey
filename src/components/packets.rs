@@ -1,8 +1,9 @@
 use std::convert::From;
 use std::fmt::{self};
+use std::net::SocketAddrV4;
 use std::{
     io::Read,
-    net::{Ipv4Addr, SocketAddr, TcpStream},
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
 };
 
 use crate::components::errors::ParseError;
@@ -49,7 +50,8 @@ pub struct Packet {
     pub payload: Option<Vec<u8>>,
 
     // Attributes parsed from payload
-    pub ip_master: Option<Ipv4Addr>,
+    pub addr_master: Option<SocketAddr>,
+    pub role: Option<Role>,
 }
 
 // ================================================
@@ -158,7 +160,8 @@ impl Default for Packet {
             payload: None,
             addr_sender: None,
             addr_receiver: None,
-            ip_master: None,
+            addr_master: None,
+            role: None,
         }
     }
 }
@@ -264,6 +267,7 @@ impl Packet {
 
         let mut packet = Packet {
             packet_id,
+            addr_sender: Some(stream.peer_addr().unwrap()),
             ..Default::default()
         };
 
@@ -279,12 +283,26 @@ impl Packet {
             PacketId::SendReplicaAck => {
                 // TODO: HoangLe [May-02]: Implement this
             }
-            PacketId::AskIp => {}
+            PacketId::AskIp => match payload_size {
+                2 => {
+                    // Parse port of thread:Receiver of sender
+                    packet.addr_sender.as_mut().unwrap().set_port(u16::from_be_bytes(
+                        payload
+                            .as_slice()
+                            .try_into()
+                            .expect("Cannot parse 2 bytes in payload to port value"),
+                    ));
+                }
+                _ => {
+                    log::info!("Packet AskIP requires specifying port of thread:Receiver of sender");
+                    return Err(ParseError::mismatched_packet_size(packet_id, bytes.len(), payload_size));
+                }
+            },
             PacketId::AskIpAck => match payload_size {
                 0 => {
                     return Err(ParseError::unavailable_master_ip());
                 }
-                4 => {
+                6 => {
                     let mut buff = Vec::with_capacity(payload_size);
                     if let Err(err) = stream.read_exact(&mut buff) {
                         log::error!("Err as reading bytes for payload: {}", err);
@@ -293,7 +311,10 @@ impl Packet {
                     packet.payload = Some(buff);
 
                     // Parse addr's Master from payload
-                    packet.ip_master = Some(Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]));
+                    let ip_master = Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]);
+                    let port_master =
+                        u16::from_be_bytes(payload[4..6].try_into().expect("Cannot cast last 2 bytes to array"));
+                    packet.addr_master = Some(SocketAddr::V4(SocketAddrV4::new(ip_master, port_master)));
                 }
                 _ => {
                     return Err(ParseError::incorrect_payload_size_ask_ip_ack(payload.len()));
@@ -320,33 +341,42 @@ impl Packet {
             PacketId::StateSyncAck => {
                 // TODO: HoangLe [May-02]: Implement this
             }
-            PacketId::Notify => {
-                // TODO: HoangLe [May-02]: Implement this
-            }
+            PacketId::Notify => match payload_size {
+                3 => {
+                    // Parse role of sender
+                    packet.role = Some(Role::from(payload[0]));
+
+                    // Parse port info from payload
+                    packet.addr_sender.as_mut().unwrap().set_port(u16::from_be_bytes(
+                        payload[1..3].try_into().expect("Cannot cast last 2 bytes to array"),
+                    ));
+                }
+                _ => {
+                    return Err(ParseError::mismatched_packet_size(packet_id, bytes.len(), payload_size));
+                }
+            },
             _ => return Err(ParseError::incorrect_packet_id(packet_id as u8)),
         }
-
-        packet.addr_sender = Some(stream.peer_addr().unwrap());
 
         log::debug!("{}", packet);
 
         return Ok(packet);
     }
 
-    pub fn create_heartbeat(addr_receiver: SocketAddr) -> Packet {
-        Packet {
-            packet_id: PacketId::Heartbeat,
-            addr_receiver: Some(addr_receiver),
-            ..Default::default()
-        }
-    }
-    pub fn create_heartbeat_ack(addr_receiver: SocketAddr) -> Packet {
-        Packet {
-            packet_id: PacketId::HeartbeatAck,
-            addr_receiver: Some(addr_receiver),
-            ..Default::default()
-        }
-    }
+    // pub fn create_heartbeat(addr_receiver: SocketAddr) -> Packet {
+    //     Packet {
+    //         packet_id: PacketId::Heartbeat,
+    //         addr_receiver: Some(addr_receiver),
+    //         ..Default::default()
+    //     }
+    // }
+    // pub fn create_heartbeat_ack(addr_receiver: SocketAddr) -> Packet {
+    //     Packet {
+    //         packet_id: PacketId::HeartbeatAck,
+    //         addr_receiver: Some(addr_receiver),
+    //         ..Default::default()
+    //     }
+    // }
     // pub fn create_RequestSendReplica() -> Packet {
     //     // TODO: HoangLe [Apr-28]: Implement this
     // }
@@ -356,14 +386,21 @@ impl Packet {
     // pub fn create_SendReplicaAck() -> Packet {
     //     // TODO: HoangLe [Apr-28]: Implement this
     // }
-    pub fn create_ask_ip(addr_receiver: SocketAddr) -> Packet {
+    pub fn create_ask_ip(addr_receiver: SocketAddr, port: Option<u16>) -> Packet {
+        // Craft payload
+        let mut payload = Vec::<u8>::new();
+        if let Some(port) = port {
+            payload.extend_from_slice(&port.to_be_bytes())
+        };
+
         Packet {
             packet_id: PacketId::AskIp,
             addr_receiver: Some(addr_receiver),
+            payload: Some(payload),
             ..Default::default()
         }
     }
-    pub fn create_ask_ip_ack(addr_receiver: SocketAddr, addr_master: Option<&Ipv4Addr>) -> Packet {
+    pub fn create_ask_ip_ack(addr_receiver: SocketAddr, addr_master: Option<&SocketAddr>) -> Packet {
         let mut packet = Packet {
             packet_id: PacketId::AskIpAck,
             addr_receiver: Some(addr_receiver),
@@ -371,8 +408,11 @@ impl Packet {
         };
         match addr_master {
             Some(addr_master) => {
-                let payload = addr_master.octets().to_vec();
-                packet.payload = Some(payload);
+                if let IpAddr::V4(ip_master) = addr_master.ip() {
+                    let mut payload = ip_master.octets().to_vec();
+                    payload.extend_from_slice(&addr_master.port().to_be_bytes());
+                    packet.payload = Some(payload);
+                }
             }
             None => {}
         }
@@ -400,24 +440,20 @@ impl Packet {
     // pub fn create_StateSyncAck() -> Packet {
     //     // TODO: HoangLe [Apr-28]: Implement this
     // }
-    pub fn create_notify(addr_receiver: SocketAddr, role: &Role) -> Packet {
-        let mut packet = Packet {
+
+    pub fn create_notify(addr_receiver: SocketAddr, role: &Role, addr_current: SocketAddr) -> Packet {
+        // Craft payload
+        let mut payload = Vec::<u8>::new();
+        payload.push(u8::try_from(role).expect("Cannot parse 'role' to u8 value."));
+
+        let port = addr_current.port();
+        payload.extend_from_slice(&port.to_be_bytes());
+
+        Packet {
             packet_id: PacketId::Notify,
             addr_receiver: Some(addr_receiver),
+            payload: Some(payload),
             ..Default::default()
-        };
-        match role {
-            Role::Data => {
-                packet.payload = Some(Vec::<u8>::from([1]));
-            }
-            Role::Master => {
-                packet.payload = Some(Vec::<u8>::from([0]));
-            }
-            _ => {
-                panic!("Invalid role: Must be either Data or Master, got: {}", u8::from(role));
-            }
         }
-
-        packet
     }
 }

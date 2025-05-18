@@ -27,7 +27,7 @@ impl Client {
     pub fn ask_master_ip(&self) {
         match TcpStream::connect(self.addr_dns) {
             Ok(mut stream) => {
-                let _ = stream.write_all(Packet::create_ask_ip(self.addr_dns).to_bytes().as_slice());
+                let _ = stream.write_all(Packet::create_ask_ip(self.addr_dns, None).to_bytes().as_slice());
                 match Packet::from_stream(&mut stream) {
                     Ok(packet_reply) => match packet_reply.addr_sender {
                         Some(addr_sender) => {
