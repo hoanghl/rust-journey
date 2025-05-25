@@ -8,6 +8,8 @@ pub struct Configs {
     pub env_ip_dns: Ipv4Addr,
     pub env_port_receiver: u16,
     pub env_port_dns: u16,
+    pub interval_heartbeat: u64,
+    pub timeout_channel_wait: u64,
 
     pub args: Vec<String>,
 }
@@ -29,6 +31,14 @@ impl Configs {
         let port_dns = match env::var("PORT_DNS") {
             Ok(value) => value.parse::<u16>().unwrap(),
             Err(_) => panic!("env 'PORT_DNS' not existed"),
+        };
+        let interval_heartbeat = match env::var("HEARTBEAT_INTERVAL_SECOND") {
+            Ok(value) => value.parse::<u64>().unwrap(),
+            Err(_) => panic!("env 'HEARTBEAT_INTERVAL_SECOND' not existed"),
+        };
+        let timeout_channel_wait = match env::var("TIMEOUT_CHANNEL_WAIT") {
+            Ok(value) => value.parse::<u64>().unwrap(),
+            Err(_) => 1,
         };
 
         // Parse arguments
@@ -58,6 +68,8 @@ impl Configs {
             env_ip_dns: ip_dns,
             env_port_receiver: port_receiver,
             env_port_dns: port_dns,
+            interval_heartbeat,
+            timeout_channel_wait,
             args,
         }
     }

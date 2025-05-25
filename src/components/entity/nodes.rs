@@ -1,16 +1,17 @@
 use log;
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::thread::{self, JoinHandle};
 use std::{
     io::Write,
-    net::{TcpListener, TcpStream},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
+    str::FromStr,
+    sync::mpsc::{channel, Receiver, Sender},
+    thread::{self, JoinHandle},
+    time::{Duration, SystemTime},
 };
 
 use crate::components::{
     configs::Configs,
-    // db::{FileInfoDB, NodeInfoDB},
+    db::NodeInfoDB,
     entity::node_roles::Role,
     errors::NodeCreationError,
     packets::{Packet, PacketId},
@@ -23,18 +24,6 @@ use crate::components::{
 pub struct Node {
     configs: Configs,
     role: Role,
-
-    // Use for communicating among threads inside node
-    pub sender_receiver2processor: Option<Sender<Packet>>,
-    pub receiver_receiver2processor: Option<Receiver<Packet>>,
-    // pub sender_processor2receiver: Option<Sender<Packet>>,
-    // pub receiver_processor2receiver: Option<Receiver<Packet>>,
-    pub sender_processor2sender: Option<Sender<Packet>>,
-    pub receiver_processor2sender: Option<Receiver<Packet>>,
-    // For data management
-    // TODO: HoangLe [May-12]: Store node and file info into these db
-    // node_info: NodeInfoDB,
-    // data_info: FileInfoDB,
 }
 
 // ================================================
@@ -44,40 +33,25 @@ pub struct Node {
 impl Node {
     /// Create new node
     pub fn new(configs: Configs, role: Role) -> Node {
-        let (sender_receiver2processor, receiver_receiver2processor) = channel::<Packet>();
-        // let (sender_processor2receiver, receiver_processor2receiver) = channel::<Packet>();
-        let (sender_processor2sender, receiver_processor2sender) = channel::<Packet>();
-
-        Node {
-            configs,
-            role,
-            sender_receiver2processor: Some(sender_receiver2processor),
-            receiver_receiver2processor: Some(receiver_receiver2processor),
-            // sender_processor2receiver: Some(sender_processor2receiver),
-            // receiver_processor2receiver: Some(receiver_processor2receiver),
-            sender_processor2sender: Some(sender_processor2sender),
-            receiver_processor2sender: Some(receiver_processor2sender),
-            // node_info: NodeInfoDB::intialize("node_info"),
-            // data_info: FileInfoDB::intialize("file_info"),
-        }
+        Node { configs, role }
     }
 
     pub fn start(&mut self) {
+        // Use for communicating among threads inside node
+        let (sender_receiver2processor, receiver_receiver2processor) = channel::<Packet>();
+        let (sender_processor2sender, receiver_processor2sender) = channel::<Packet>();
         // ================================================
         // Declare different threads for different functions
         // ================================================
-        let port = match self.role {
-            Role::DNS => self.configs.env_port_dns,
-            _ => self.configs.env_port_receiver,
-        };
-        let thread_receiver = match self.create_thread_receiver(SocketAddr::from(([127, 0, 0, 1], port))) {
+
+        let thread_receiver = match self.create_thread_receiver(sender_receiver2processor) {
             Ok(handle) => handle,
             Err(err) => {
                 log::error!("{}", err);
                 return;
             }
         };
-        let thread_sender = match self.create_thread_sender() {
+        let thread_sender = match self.create_thread_sender(receiver_processor2sender) {
             Ok(handle) => handle,
             Err(err) => {
                 log::error!("{}", err);
@@ -88,7 +62,7 @@ impl Node {
         // ================================================
         // Start processing packets
         // ================================================
-        self.trigger_processor();
+        self.trigger_processor(&receiver_receiver2processor, &sender_processor2sender);
 
         // ================================================
         // Join threads
@@ -105,20 +79,26 @@ impl Node {
     }
 
     /// Create a thread dedicated for receiving incoming message
-    fn create_thread_receiver(&mut self, addr: SocketAddr) -> Result<JoinHandle<()>, NodeCreationError> {
+    fn create_thread_receiver(
+        &mut self,
+        sender_receiver2processor: Sender<Packet>,
+    ) -> Result<JoinHandle<()>, NodeCreationError> {
         log::info!("Creating thread: Receiver");
 
-        let sender_receiver2processor = self.sender_receiver2processor.take().unwrap();
-
+        let port = match self.role {
+            Role::DNS => self.configs.env_port_dns,
+            _ => self.configs.env_port_receiver,
+        };
+        let addr_node = SocketAddr::from(([127, 0, 0, 1], port));
         Ok(thread::spawn(move || {
-            let listener = match TcpListener::bind(&addr) {
+            let listener = match TcpListener::bind(&addr_node) {
                 Ok(listener) => listener,
                 Err(_) => {
-                    log::error!("Cannot bind to {}", addr);
+                    log::error!("Cannot bind to {}", addr_node);
                     panic!();
                 }
             };
-            log::info!("Server starts at {}", addr);
+            log::info!("Server starts at {}", addr_node);
 
             for stream in listener.incoming() {
                 match stream {
@@ -149,10 +129,11 @@ impl Node {
     }
 
     /// Create thread for sending packet
-    fn create_thread_sender(&mut self) -> Result<JoinHandle<()>, NodeCreationError> {
+    fn create_thread_sender(
+        &mut self,
+        receiver_processor2sender: Receiver<Packet>,
+    ) -> Result<JoinHandle<()>, NodeCreationError> {
         log::info!("Creating thread: Sender");
-
-        let receiver_processor2sender = self.receiver_processor2sender.take().unwrap();
 
         Ok(thread::spawn(move || {
             for packet in receiver_processor2sender {
@@ -187,14 +168,24 @@ impl Node {
     }
 
     /// Start processor
-    fn trigger_processor(&mut self) {
-        let sender_processor2sender = self.sender_processor2sender.as_ref().unwrap();
-        let addr_dns = SocketAddr::new(IpAddr::V4(self.configs.env_ip_dns), self.configs.env_port_dns);
+    fn trigger_processor(
+        &mut self,
+        receiver_receiver2processor: &Receiver<Packet>,
+        sender_processor2sender: &Sender<Packet>,
+    ) {
+        let addr_dns: SocketAddr = SocketAddr::new(IpAddr::V4(self.configs.env_ip_dns), self.configs.env_port_dns);
         let mut addr_master: Option<SocketAddr> = None;
         let addr_current = SocketAddr::V4(SocketAddrV4::new(
             Ipv4Addr::new(127, 0, 0, 1),
             self.configs.env_port_receiver,
         ));
+
+        // For data management
+        let node_info = NodeInfoDB::intialize("node_info");
+        // let data_info = FileInfoDB::intialize(db_name)
+
+        // For counter
+        let mut last_ts: Option<SystemTime> = None;
 
         // ================================================
         // Execute 1st step of Initial procedure based on node's role
@@ -215,11 +206,8 @@ impl Node {
             Role::Data => {
                 // Ask Master IP from DNS and notify to current master
 
-                if let Err(err) = self
-                    .sender_processor2sender
-                    .as_ref()
-                    .unwrap()
-                    .send(Packet::create_ask_ip(addr_dns, Some(self.configs.env_port_receiver)))
+                if let Err(err) =
+                    sender_processor2sender.send(Packet::create_ask_ip(addr_dns, Some(self.configs.env_port_receiver)))
                 {
                     log::error!("Error as sending AskIP: {}", err);
                     self.trigger_graceful_shutdown();
@@ -231,76 +219,108 @@ impl Node {
         // ================================================
         // Start processing loop
         // ================================================
+        loop {
+            if let Ok(packet) =
+                receiver_receiver2processor.recv_timeout(Duration::from_secs(self.configs.timeout_channel_wait))
+            {
+                log::debug!("Received: {}", packet);
 
-        for packet in self.receiver_receiver2processor.as_ref().unwrap() {
-            log::debug!("Received: {}", packet);
+                let addr_sender = match packet.addr_sender {
+                    None => {
+                        log::error!("Attribute 'addr_sender' in packet not existed.");
+                        continue;
+                    }
+                    Some(addr) => addr,
+                };
 
-            let addr_sender = match packet.addr_sender {
-                None => {
-                    log::error!("Attribute 'addr_sender' in packet not existed.");
-                    continue;
-                }
-                Some(addr) => addr,
-            };
+                match self.role {
+                    Role::Default => {
+                        log::error!("Role:Default not allow. Exitting.");
+                        break;
+                    }
+                    Role::DNS => {
+                        match packet.packet_id {
+                            PacketId::AskIp => {
+                                // Data/Client --AskIp-> DNS
+                                match addr_master {
+                                    None => {
+                                        _forward_packet(
+                                            sender_processor2sender,
+                                            Packet::create_ask_ip_ack(addr_sender, None),
+                                        );
+                                    }
+                                    Some(addr_master) => {
+                                        _forward_packet(
+                                            sender_processor2sender,
+                                            Packet::create_ask_ip_ack(addr_sender, Some(&addr_master)),
+                                        );
+                                    }
+                                };
+                            }
+                            PacketId::Notify => {
+                                // Master --Notify-> DNS
 
-            match self.role {
-                Role::Default => {
-                    log::error!("Role:Default not allow. Exitting.");
-                    break;
-                }
-                Role::DNS => {
-                    match packet.packet_id {
-                        PacketId::AskIp => {
-                            // Data/Client --AskIp-> DNS
-                            match addr_master {
-                                None => {
-                                    if let Err(err) =
-                                        sender_processor2sender.send(Packet::create_ask_ip_ack(addr_sender, None))
-                                    {
-                                        log::error!("Err as sending from thread:Processor -> thread:Sender: {}", err);
-                                        continue;
-                                    };
+                                addr_master = packet.addr_sender;
+                                log::info!("Address Master just notified: {}", &addr_master.as_ref().unwrap());
+                            }
+                            _ => {
+                                log::error!("Unsupported packet type: {}", packet);
+                                continue;
+                            }
+                        };
+                    }
+                    Role::Master => {
+                        match packet.packet_id {
+                            PacketId::HeartbeatAck => {
+                                if let Some(node_id) = packet.node_id {
+                                    match SocketAddrV4::from_str(node_id.as_str()) {
+                                        Ok(addr) => {
+                                            if let Err(err) =
+                                                node_info.upsert(addr.ip().clone(), addr.port(), Role::Data)
+                                            {
+                                                log::error!("Error as UPSERT: {}", err);
+                                            }
+                                        }
+                                        Err(err) => {
+                                            log::error!(
+                                                "Cannot parse following node_id to SocketAddrV4: {} | Err: {}",
+                                                node_id,
+                                                err
+                                            );
+                                        }
+                                    }
                                 }
-                                Some(addr_master) => {
-                                    if let Err(err) = sender_processor2sender
-                                        .send(Packet::create_ask_ip_ack(addr_sender, Some(&addr_master)))
-                                    {
-                                        log::error!("Err as sending from thread:Processor -> thread:Sender: {}", err);
-                                        continue;
-                                    };
-                                }
-                            };
-                        }
-                        PacketId::Notify => {
-                            // Master --Notify-> DNS
+                            }
+                            PacketId::Notify => {
+                                log::info!("Master receives NOTIFY from: {:?}", packet.addr_sender);
 
-                            addr_master = packet.addr_sender;
-                            log::info!("Address Master just notified: {}", &addr_master.as_ref().unwrap());
-                        }
-                        _ => {
-                            log::error!("Unsupported packet type: {}", packet);
-                            continue;
-                        }
-                    };
-                }
-                Role::Master => {
-                    match packet.packet_id {
-                        PacketId::HeartbeatAck => {
-                            // TODO: HoangLe [May-03]: Record the healthy status
-                        }
-                        PacketId::Notify => {
-                            log::info!("Master receives NOTIFY from: {:?}", packet.addr_sender);
-                        }
-                        _ => {
-                            log::error!("Unsupported packet type: {}", packet);
-                            continue;
+                                match packet.addr_sender {
+                                    Some(addr_sender) => {
+                                        // data_nodes.push(addr_sender);
+
+                                        if let IpAddr::V4(ip) = addr_sender.ip() {
+                                            let _ = node_info.upsert(ip, addr_sender.port(), Role::Data);
+
+                                            log::info!("Master added new Data node: {}", addr_sender);
+                                        }
+                                    }
+                                    None => {
+                                        log::error!("NOTIFY packet contains no sender' address");
+                                    }
+                                }
+                            }
+                            _ => {
+                                log::error!("Unsupported packet type: {}", packet);
+                                continue;
+                            }
                         }
                     }
-                }
-                Role::Data => {
-                    match packet.packet_id {
+                    Role::Data => match packet.packet_id {
                         PacketId::Heartbeat => {
-                            // TODO: HoangLe [May-03]: Send Heartbeat ACK
+                            _forward_packet(
+                                sender_processor2sender,
+                                Packet::create_heartbeat_ack(addr_master.clone().unwrap(), addr_current.clone()),
+                            );
                         }
                         PacketId::AskIpAck => match packet.addr_master {
                             None => {
@@ -309,25 +329,75 @@ impl Node {
                             }
                             Some(addr) => {
                                 log::debug!("Addr master: {:?}", addr);
+
                                 addr_master = Some(addr.clone());
 
-                                if let Err(err) = sender_processor2sender.send(Packet::create_notify(
-                                    addr,
-                                    &self.role,
-                                    addr_current.clone(),
-                                )) {
-                                    log::error!("Err as sending from thread:Processor -> thread:Sender: {}", err);
-                                    continue;
-                                };
+                                _forward_packet(
+                                    sender_processor2sender,
+                                    Packet::create_notify(addr, &self.role, addr_current.clone()),
+                                );
                             }
                         },
                         _ => {
                             log::error!("Unsupported packet type: {}", packet);
                             continue;
                         }
+                    },
+                }
+            }
+
+            // If current node is Master, check timer and send Heartbeat
+            match self.role {
+                Role::Master => {
+                    if last_ts.is_none() {
+                        last_ts = Some(SystemTime::now());
+                    } else {
+                        match SystemTime::now().duration_since(last_ts.unwrap()) {
+                            Ok(n) => {
+                                if n.as_secs() >= self.configs.interval_heartbeat {
+                                    last_ts = Some(SystemTime::now());
+
+                                    // Send heartbeat
+                                    if let Ok(data_nodes) = node_info.get_data_nodes() {
+                                        for node in &data_nodes {
+                                            match node.ip {
+                                                None => {
+                                                    log::error!(
+                                                        "Cannot retrieve ip from node with node_id = {}",
+                                                        node.node_id
+                                                    );
+                                                    continue;
+                                                }
+                                                Some(ip) => {
+                                                    let addr = SocketAddr::V4(SocketAddrV4::new(ip, node.port));
+
+                                                    log::info!("Send HEARTBEAT to {}", addr);
+                                                    _forward_packet(
+                                                        sender_processor2sender,
+                                                        Packet::create_heartbeat(addr),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                log::error!("{}", err);
+                            }
+                        }
                     }
+                }
+                _ => {
+                    last_ts = None;
                 }
             }
         }
     }
+}
+
+fn _forward_packet(sender_processor2sender: &Sender<Packet>, packet: Packet) {
+    if let Err(err) = sender_processor2sender.send(packet) {
+        log::error!("Err as sending from thread:Processor -> thread:Sender: {}", err);
+    };
 }

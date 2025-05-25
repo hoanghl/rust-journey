@@ -6,9 +6,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
 };
 
-use crate::components::errors::ParseError;
-
-use super::entity::node_roles::Role;
+use crate::components::{db::_get_node_id, entity::node_roles::Role, errors::ParseError};
 
 // ================================================
 // Definition for enum and constants
@@ -52,6 +50,7 @@ pub struct Packet {
     // Attributes parsed from payload
     pub addr_master: Option<SocketAddr>,
     pub role: Option<Role>,
+    pub node_id: Option<String>,
 }
 
 // ================================================
@@ -162,6 +161,7 @@ impl Default for Packet {
             addr_receiver: None,
             addr_master: None,
             role: None,
+            node_id: None,
         }
     }
 }
@@ -216,7 +216,7 @@ impl Packet {
 
     /// Create Packet from stream
     pub fn from_stream(stream: &mut TcpStream) -> Result<Packet, ParseError> {
-        log::debug!("Receive data from: {}", stream.peer_addr().unwrap());
+        // log::debug!("Receive data from: {}", stream.peer_addr().unwrap());
 
         // ================================================
         // Read bytes from stream
@@ -236,12 +236,6 @@ impl Packet {
             }
         }
 
-        log::debug!("Total bytes received: {}", bytes.len());
-
-        for byte in &bytes {
-            log::debug!("Received byte: {}", byte);
-        }
-
         // ================================================
         // Parse header
         // ================================================
@@ -250,10 +244,10 @@ impl Packet {
         }
 
         let packet_id = PacketId::from(bytes[0]);
-        log::debug!("packet_id = {}", packet_id);
+        // log::debug!("packet_id = {}", packet_id);
 
         let payload_size = u32::from_be_bytes(bytes[1..5].try_into().expect("Incorrect length")) as usize;
-        log::debug!("payload_size = {}", payload_size);
+        // log::debug!("payload_size = {}", payload_size);
 
         if bytes.len() != SIZE_HEADER + payload_size {
             return Err(ParseError::mismatched_packet_size(packet_id, bytes.len(), payload_size));
@@ -273,7 +267,12 @@ impl Packet {
 
         match packet_id {
             PacketId::Heartbeat => {}
-            PacketId::HeartbeatAck => {}
+            PacketId::HeartbeatAck => match String::from_utf8(payload) {
+                Ok(node_id) => packet.node_id = Some(node_id),
+                Err(err) => {
+                    log::error!("Parsing HEARTBEAT_ACK: Cannot parse node_id: {err}");
+                }
+            },
             PacketId::RequestSendReplica => {
                 // TODO: HoangLe [May-02]: Implement this
             }
@@ -363,20 +362,33 @@ impl Packet {
         return Ok(packet);
     }
 
-    // pub fn create_heartbeat(addr_receiver: SocketAddr) -> Packet {
-    //     Packet {
-    //         packet_id: PacketId::Heartbeat,
-    //         addr_receiver: Some(addr_receiver),
-    //         ..Default::default()
-    //     }
-    // }
-    // pub fn create_heartbeat_ack(addr_receiver: SocketAddr) -> Packet {
-    //     Packet {
-    //         packet_id: PacketId::HeartbeatAck,
-    //         addr_receiver: Some(addr_receiver),
-    //         ..Default::default()
-    //     }
-    // }
+    pub fn create_heartbeat(addr_receiver: SocketAddr) -> Packet {
+        Packet {
+            packet_id: PacketId::Heartbeat,
+            addr_receiver: Some(addr_receiver),
+            ..Default::default()
+        }
+    }
+
+    pub fn create_heartbeat_ack(addr_receiver: SocketAddr, addr_current: SocketAddr) -> Packet {
+        let mut payload = Vec::<u8>::new();
+        match addr_current {
+            SocketAddr::V4(addr) => {
+                payload.extend_from_slice(_get_node_id(addr.ip(), addr.port()).as_bytes());
+            }
+            _ => {
+                log::error!("Creating HEARTBEAT_ACK, but IP of current node isn't IPv4 format.");
+            }
+        }
+
+        Packet {
+            packet_id: PacketId::HeartbeatAck,
+            addr_receiver: Some(addr_receiver),
+            payload: Some(payload),
+            ..Default::default()
+        }
+    }
+
     // pub fn create_RequestSendReplica() -> Packet {
     //     // TODO: HoangLe [Apr-28]: Implement this
     // }
@@ -386,6 +398,7 @@ impl Packet {
     // pub fn create_SendReplicaAck() -> Packet {
     //     // TODO: HoangLe [Apr-28]: Implement this
     // }
+
     pub fn create_ask_ip(addr_receiver: SocketAddr, port: Option<u16>) -> Packet {
         // Craft payload
         let mut payload = Vec::<u8>::new();
@@ -400,6 +413,7 @@ impl Packet {
             ..Default::default()
         }
     }
+
     pub fn create_ask_ip_ack(addr_receiver: SocketAddr, addr_master: Option<&SocketAddr>) -> Packet {
         let mut packet = Packet {
             packet_id: PacketId::AskIpAck,
@@ -419,6 +433,7 @@ impl Packet {
 
         packet
     }
+
     // pub fn create_RequestFromClient() -> Packet {
     //     // TODO: HoangLe [Apr-28]: Implement this
     // }
