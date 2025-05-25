@@ -1,17 +1,36 @@
-mod linked_list;
-// mod linked_list_2;
+use components::{
+    configs::Configs,
+    entity::{client::Client, node_roles::Role, nodes::Node},
+};
+
+mod components;
 
 fn main() {
-    env_logger::init();
+    // ================================================
+    // Intialize configs
+    // ================================================
+    let configs = Configs::initialize();
 
-    let mut ll = linked_list::LinkedList1::<i32>::new();
-    ll.insert(123);
-    ll.insert(234);
-
-    // let a = ll.head.as_ref().unwrap();
-    // a.next.as_ref().unwrap().print();
-
-    ll.traverse();
-
-    log::info!("dd");
+    // ================================================
+    // Establish server
+    // ================================================
+    match configs.args[1].as_str() {
+        "master" => {
+            let mut node = Node::new(configs, Role::Master);
+            node.start();
+        }
+        "data" => {
+            let mut node = Node::new(configs, Role::Data);
+            node.start();
+        }
+        "dns" => {
+            let mut node = Node::new(configs, Role::DNS);
+            node.start()
+        }
+        "client" => {
+            let client = Client::new(&configs);
+            client.ask_master_ip();
+        }
+        _ => panic!("First argument must be a valid mode"),
+    };
 }
