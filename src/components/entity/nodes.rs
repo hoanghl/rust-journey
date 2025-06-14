@@ -3,6 +3,7 @@ use log;
 use std::{
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
+    process::exit,
     str::FromStr,
     sync::mpsc::{channel, Receiver, Sender},
     thread::{self, JoinHandle},
@@ -11,10 +12,10 @@ use std::{
 
 use crate::components::{
     configs::Configs,
-    db::NodeInfoDB,
+    db::{FileInfoDB, FileInfoEntry, NodeInfoDB},
     entity::node_roles::Role,
     errors::NodeCreationError,
-    packets::{Packet, PacketId},
+    packets::{forward_packet, Action, Packet, PacketId},
 };
 
 // ================================================
@@ -182,9 +183,35 @@ impl Node {
 
         // For data management
         let node_info = NodeInfoDB::intialize("node_info");
-        // let data_info = FileInfoDB::intialize(db_name)
+        let data_info = FileInfoDB::intialize("file_info");
 
-        // For counter
+        // NOTE: HoangLe [Jun-14]: The following is for testing purpose. Remove after testing
+        if let Role::Master = self.role {
+            let file_info = FileInfoEntry::initialize(
+                String::from("cats.jpg"),
+                true,
+                Some(String::from("/Users/hoangle/Projects/xButler/cats.jpg")),
+                String::from("127.0.0.1:123"),
+            );
+            if let Err(err) = data_info.upsert(&file_info) {
+                log::error!("Error as upsert: {}", err);
+                exit(1);
+            }
+
+            match data_info.get_file_info(&file_info.filename) {
+                Ok(file_info) => {
+                    file_info.iter().for_each(|x| {
+                        log::info!("{} - {} - {:?} - {:?}", x.filename, x.node_id, x.path, x.last_updated)
+                    });
+                }
+                Err(err) => {
+                    log::error!("{}", err);
+                    exit(1);
+                }
+            }
+        }
+
+        // For counter: Use for heartbeat timer
         let mut last_ts: Option<SystemTime> = None;
 
         // ================================================
@@ -207,7 +234,7 @@ impl Node {
                 // Ask Master IP from DNS and notify to current master
 
                 if let Err(err) =
-                    sender_processor2sender.send(Packet::create_ask_ip(addr_dns, Some(self.configs.env_port_receiver)))
+                    sender_processor2sender.send(Packet::create_ask_ip(addr_dns, self.configs.env_port_receiver))
                 {
                     log::error!("Error as sending AskIP: {}", err);
                     self.trigger_graceful_shutdown();
@@ -221,7 +248,7 @@ impl Node {
         // ================================================
         loop {
             if let Ok(packet) =
-                receiver_receiver2processor.recv_timeout(Duration::from_secs(self.configs.timeout_channel_wait))
+                receiver_receiver2processor.recv_timeout(Duration::from_secs(self.configs.timeout_chan_wait))
             {
                 log::debug!("Received: {}", packet);
 
@@ -244,13 +271,13 @@ impl Node {
                                 // Data/Client --AskIp-> DNS
                                 match addr_master {
                                     None => {
-                                        _forward_packet(
+                                        forward_packet(
                                             sender_processor2sender,
                                             Packet::create_ask_ip_ack(addr_sender, None),
                                         );
                                     }
                                     Some(addr_master) => {
-                                        _forward_packet(
+                                        forward_packet(
                                             sender_processor2sender,
                                             Packet::create_ask_ip_ack(addr_sender, Some(&addr_master)),
                                         );
@@ -309,6 +336,31 @@ impl Node {
                                     }
                                 }
                             }
+                            PacketId::RequestFromClient => {
+                                if packet.flag_read_write.is_none() {
+                                    log::error!("Received RequestFromClient: 'flag_read_write' not specified");
+                                    continue;
+                                };
+                                if packet.addr_sender.is_none() {
+                                    log::error!("Received RequestFromClient: Cannot determine 'packet.addr_sender'");
+                                    continue;
+                                }
+
+                                match packet.flag_read_write.unwrap() {
+                                    Action::Read => {
+                                        // TODO: HoangLe [Jun-14]: Implement this
+                                    }
+                                    Action::Write => {
+                                        let mut add_node = addr_current.clone();
+                                        add_node.set_port(self.configs.env_port_receiver);
+
+                                        forward_packet(
+                                            sender_processor2sender,
+                                            Packet::create_response_node_ip(packet.addr_sender.unwrap(), add_node),
+                                        );
+                                    }
+                                }
+                            }
                             _ => {
                                 log::error!("Unsupported packet type: {}", packet);
                                 continue;
@@ -317,7 +369,7 @@ impl Node {
                     }
                     Role::Data => match packet.packet_id {
                         PacketId::Heartbeat => {
-                            _forward_packet(
+                            forward_packet(
                                 sender_processor2sender,
                                 Packet::create_heartbeat_ack(addr_master.clone().unwrap(), addr_current.clone()),
                             );
@@ -332,12 +384,13 @@ impl Node {
 
                                 addr_master = Some(addr.clone());
 
-                                _forward_packet(
+                                forward_packet(
                                     sender_processor2sender,
                                     Packet::create_notify(addr, &self.role, addr_current.clone()),
                                 );
                             }
                         },
+
                         _ => {
                             log::error!("Unsupported packet type: {}", packet);
                             continue;
@@ -372,7 +425,7 @@ impl Node {
                                                     let addr = SocketAddr::V4(SocketAddrV4::new(ip, node.port));
 
                                                     log::info!("Send HEARTBEAT to {}", addr);
-                                                    _forward_packet(
+                                                    forward_packet(
                                                         sender_processor2sender,
                                                         Packet::create_heartbeat(addr),
                                                     );
@@ -394,10 +447,4 @@ impl Node {
             }
         }
     }
-}
-
-fn _forward_packet(sender_processor2sender: &Sender<Packet>, packet: Packet) {
-    if let Err(err) = sender_processor2sender.send(packet) {
-        log::error!("Err as sending from thread:Processor -> thread:Sender: {}", err);
-    };
 }

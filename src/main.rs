@@ -1,6 +1,7 @@
 use components::{
     configs::Configs,
     entity::{client::Client, node_roles::Role, nodes::Node},
+    packets::Action,
 };
 
 mod components;
@@ -28,8 +29,8 @@ fn main() {
             node.start()
         }
         "client" => {
-            let client = Client::new(&configs);
-            client.ask_master_ip();
+            let mut client = Client::new(&configs);
+            client.start(Action::Write);
         }
         _ => panic!("First argument must be a valid mode"),
     };

@@ -1,9 +1,11 @@
-use std::convert::From;
-use std::fmt::{self};
-use std::net::SocketAddrV4;
 use std::{
+    convert::From,
+    fmt::{self},
     io::Read,
+    net::SocketAddrV4,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
+    sync::mpsc::{Receiver, Sender},
+    time::Duration,
 };
 
 use crate::components::{db::_get_node_id, entity::node_roles::Role, errors::ParseError};
@@ -15,6 +17,12 @@ use crate::components::{db::_get_node_id, entity::node_roles::Role, errors::Pars
 const BYTE_SEP_CHARACTER: u8 = 124; // byte value of character '|'
 const SIZE_HEADER: usize = 5;
 const BUFF_LEN: usize = 1024;
+
+#[repr(u8)]
+pub enum Action {
+    Read = 0,
+    Write = 1,
+}
 
 #[rustfmt::skip]
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -49,13 +57,34 @@ pub struct Packet {
 
     // Attributes parsed from payload
     pub addr_master: Option<SocketAddr>,
+    pub addr_data: Option<SocketAddr>,
     pub role: Option<Role>,
     pub node_id: Option<String>,
+    pub flag_read_write: Option<Action>,
+    pub filename: Option<String>,
 }
 
 // ================================================
 // Implementation
 // ================================================
+
+impl From<u8> for Action {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Action::Read,
+            1 => Action::Write,
+            _ => panic!("Error as parsing to enum Action: value = {}", value),
+        }
+    }
+}
+impl From<Action> for u8 {
+    fn from(value: Action) -> Self {
+        match value {
+            Action::Read => 0,
+            Action::Write => 1,
+        }
+    }
+}
 
 impl From<u8> for PacketId {
     fn from(value: u8) -> Self {
@@ -160,8 +189,11 @@ impl Default for Packet {
             addr_sender: None,
             addr_receiver: None,
             addr_master: None,
+            addr_data: None,
             role: None,
             node_id: None,
+            flag_read_write: None,
+            filename: None,
         }
     }
 }
@@ -320,11 +352,66 @@ impl Packet {
                 }
             },
             PacketId::RequestFromClient => {
-                // TODO: HoangLe [May-02]: Implement this
+                // Parse 'flag_read_write'
+                match payload[0] {
+                    0 | 1 => {
+                        packet.flag_read_write = Some(Action::from(payload[0]));
+                    }
+                    _ => {
+                        log::error!(
+                            "Receiving RequestFromClient from: {:?}: Invalid 'flag_read_write': {}",
+                            packet.addr_sender,
+                            payload[0]
+                        );
+                        return Err(ParseError::stream_reading_err());
+                    }
+                }
+
+                // Parse 'port'
+                packet.addr_sender.as_mut().unwrap().set_port(u16::from_be_bytes(
+                    payload[1..3]
+                        .try_into()
+                        .expect("Cannot parse 2 bytes in payload to port value"),
+                ));
+
+                // Parse 'filename'
+                match String::from_utf8(payload[3..payload_size - 1].to_vec()) {
+                    Ok(filename) => {
+                        packet.filename = Some(filename);
+                    }
+                    Err(err) => {
+                        log::error!(
+                            "Receiving RequestFromClient from: {:?}: Cannot parse filename: {}",
+                            packet.addr_sender,
+                            err
+                        );
+                        return Err(ParseError::stream_reading_err());
+                    }
+                };
             }
-            PacketId::ResponseNodeIp => {
-                // TODO: HoangLe [May-02]: Implement this
-            }
+
+            PacketId::ResponseNodeIp => match payload_size {
+                0 => {
+                    return Err(ParseError::unavailable_master_ip());
+                }
+                6 => {
+                    let mut buff = Vec::with_capacity(payload_size);
+                    if let Err(err) = stream.read_exact(&mut buff) {
+                        log::error!("Err as reading bytes for payload: {}", err);
+                        return Err(ParseError::stream_reading_err());
+                    }
+                    packet.payload = Some(buff);
+
+                    // Parse Data node's address from payload
+                    let ip = Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]);
+                    let port = u16::from_be_bytes(payload[4..6].try_into().expect("Cannot cast last 2 bytes to array"));
+                    packet.addr_data = Some(SocketAddr::V4(SocketAddrV4::new(ip, port)));
+                }
+                _ => {
+                    return Err(ParseError::incorrect_payload_size_ask_ip_ack(payload.len()));
+                }
+            },
+
             PacketId::ClientUpload => {
                 // TODO: HoangLe [May-02]: Implement this
             }
@@ -399,12 +486,10 @@ impl Packet {
     //     // TODO: HoangLe [Apr-28]: Implement this
     // }
 
-    pub fn create_ask_ip(addr_receiver: SocketAddr, port: Option<u16>) -> Packet {
+    pub fn create_ask_ip(addr_receiver: SocketAddr, port: u16) -> Packet {
         // Craft payload
         let mut payload = Vec::<u8>::new();
-        if let Some(port) = port {
-            payload.extend_from_slice(&port.to_be_bytes())
-        };
+        payload.extend_from_slice(&port.to_be_bytes());
 
         Packet {
             packet_id: PacketId::AskIp,
@@ -434,12 +519,48 @@ impl Packet {
         packet
     }
 
-    // pub fn create_RequestFromClient() -> Packet {
-    //     // TODO: HoangLe [Apr-28]: Implement this
-    // }
-    // pub fn create_ResponseNodeIp() -> Packet {
-    //     // TODO: HoangLe [Apr-28]: Implement this
-    // }
+    pub fn create_request_from_client(
+        action: Action,
+        port: u16,
+        filename: String,
+        addr_receiver: SocketAddr,
+    ) -> Packet {
+        let mut packet = Packet {
+            packet_id: PacketId::RequestFromClient,
+            addr_receiver: Some(addr_receiver),
+            ..Default::default()
+        };
+
+        // Craft payload
+        let mut payload = Vec::<u8>::new();
+        payload.push(action as u8);
+
+        payload.extend_from_slice(&port.to_be_bytes());
+
+        payload.extend_from_slice(filename.as_bytes());
+
+        packet.payload = Some(payload);
+
+        packet
+    }
+
+    pub fn create_response_node_ip(addr_receiver: SocketAddr, addr_node: SocketAddr) -> Packet {
+        let mut packet = Packet {
+            packet_id: PacketId::ResponseNodeIp,
+            addr_receiver: Some(addr_receiver),
+            ..Default::default()
+        };
+
+        // Craft payload: Contain IP and port of node holding data file
+        if let IpAddr::V4(ip) = addr_node.ip() {
+            let mut payload = ip.octets().to_vec();
+            payload.extend_from_slice(&addr_node.port().to_be_bytes());
+
+            packet.payload = Some(payload);
+        }
+
+        packet
+    }
     // pub fn create_ClientUpload() -> Packet {
     //     // TODO: HoangLe [Apr-28]: Implement this
     // }
@@ -470,5 +591,23 @@ impl Packet {
             payload: Some(payload),
             ..Default::default()
         }
+    }
+}
+
+pub fn forward_packet(sender_processor2sender: &Sender<Packet>, packet: Packet) {
+    if let Err(err) = sender_processor2sender.send(packet) {
+        log::error!("Err as sending from thread:Processor -> thread:Sender: {}", err);
+    };
+}
+
+pub fn wait_packet(receiver_receiver2processor: &Receiver<Packet>) -> Packet {
+    loop {
+        let received = receiver_receiver2processor.recv_timeout(Duration::from_secs(2));
+        if let Ok(packet) = received {
+            // log::info!("{}", err);
+            // continue;
+            return packet;
+        }
+        // let packet = received.unwrap();
     }
 }

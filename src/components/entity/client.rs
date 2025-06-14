@@ -2,49 +2,222 @@
 
 use std::{
     io::Write,
-    net::{IpAddr, SocketAddr, TcpStream},
+    net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
+    process::exit,
+    sync::mpsc::{channel, Receiver, Sender},
+    thread::{self, JoinHandle},
 };
 
-use crate::components::{configs::Configs, packets::Packet};
+use log;
+
+use crate::components::{
+    configs::Configs,
+    errors::NodeCreationError,
+    packets::{forward_packet, wait_packet, Action, Packet, PacketId},
+};
 
 // ================================================
 // Definitions
 // ================================================
-pub struct Client {
-    addr_dns: SocketAddr,
+pub struct Client<'conf> {
+    configs: &'conf Configs,
 }
 
 // ================================================
 // Implementations
 // ================================================
-impl Client {
+impl<'conf> Client<'conf> {
     pub fn new(configs: &Configs) -> Client {
-        Client {
-            addr_dns: SocketAddr::new(IpAddr::V4(configs.env_ip_dns), configs.env_port_dns),
+        Client { configs }
+    }
+
+    pub fn start(&mut self, action: Action) {
+        // Use for communicating among threads inside node
+        let (sender_receiver2processor, receiver_receiver2processor) = channel::<Packet>();
+        let (sender_processor2sender, receiver_processor2sender) = channel::<Packet>();
+        // ================================================
+        // Declare different threads for different functions
+        // ================================================
+
+        let thread_receiver = match self.create_thread_receiver(sender_receiver2processor) {
+            Ok(handle) => handle,
+            Err(err) => {
+                log::error!("{}", err);
+                return;
+            }
+        };
+        let thread_sender = match self.create_thread_sender(receiver_processor2sender) {
+            Ok(handle) => handle,
+            Err(err) => {
+                log::error!("{}", err);
+                return;
+            }
+        };
+
+        // ================================================
+        // Start processing packets
+        // ================================================
+        match action {
+            Action::Read => {
+                // TODO: HoangLe [Jun-14]: Implement this
+            }
+            Action::Write => {
+                self.send_file(&receiver_receiver2processor, &sender_processor2sender);
+            }
+        }
+
+        // ================================================
+        // Join threads
+        // ================================================
+
+        if let Err(err) = thread_receiver.join() {
+            log::error!("Error as creating thread_receiver: {:?}", err);
+            return;
+        }
+        if let Err(err) = thread_sender.join() {
+            log::error!("Error as creating thread_sender: {:?}", err);
+            return;
         }
     }
 
-    pub fn ask_master_ip(&self) {
-        match TcpStream::connect(self.addr_dns) {
-            Ok(mut stream) => {
-                let _ = stream.write_all(Packet::create_ask_ip(self.addr_dns, None).to_bytes().as_slice());
-                match Packet::from_stream(&mut stream) {
-                    Ok(packet_reply) => match packet_reply.addr_sender {
-                        Some(addr_sender) => {
-                            log::info!("Master has address: {}", addr_sender);
-                        }
-                        None => {
-                            log::info!("Address for current Master not available");
-                        }
-                    },
-                    Err(error) => {
-                        log::error!("{}", error);
+    /// Create a thread dedicated for receiving incoming message
+    fn create_thread_receiver(
+        &mut self,
+        sender_receiver2processor: Sender<Packet>,
+    ) -> Result<JoinHandle<()>, NodeCreationError> {
+        log::info!("Creating thread: Receiver");
+
+        let port = self.configs.env_port_receiver;
+        let addr_node = SocketAddr::from(([127, 0, 0, 1], port));
+        Ok(thread::spawn(move || {
+            let listener = match TcpListener::bind(&addr_node) {
+                Ok(listener) => listener,
+                Err(_) => {
+                    log::error!("Cannot bind to {}", addr_node);
+                    panic!();
+                }
+            };
+            log::info!("Server starts at {}", addr_node);
+
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(mut stream) => {
+                        let packet = match Packet::from_stream(&mut stream) {
+                            Ok(packet) => packet,
+                            Err(e) => {
+                                log::error!("{}", e);
+                                continue;
+                            }
+                        };
+
+                        // Send to thread Processor
+                        if let Err(err) = sender_receiver2processor.send(packet) {
+                            log::error!(
+                                "Error as sending packet from thread:Receiver -> thread:Processor: err = {}",
+                                err
+                            );
+                        };
+                    }
+                    Err(e) => {
+                        log::error!("{}", e);
+                        continue;
                     }
                 }
             }
-            Err(e) => {
-                log::error!("Cannot connect to: {}: {}", self.addr_dns, e);
+        }))
+    }
+
+    /// Create thread for sending packet
+    fn create_thread_sender(
+        &mut self,
+        receiver_processor2sender: Receiver<Packet>,
+    ) -> Result<JoinHandle<()>, NodeCreationError> {
+        // NOTE: HoangLe [Jun-14]: Consider removing this implementation after converting Node to trait
+        log::info!("Creating thread: Sender");
+
+        Ok(thread::spawn(move || {
+            for packet in receiver_processor2sender {
+                let addr_receiver = match packet.addr_receiver {
+                    Some(addr) => addr,
+                    None => {
+                        log::error!("Field 'addr_receiver' not specified.");
+                        continue;
+                    }
+                };
+
+                // Connect and send
+                let mut stream = match TcpStream::connect(&addr_receiver) {
+                    Ok(stream) => stream,
+                    Err(_) => {
+                        log::error!("Cannot connect to address: {}", addr_receiver);
+                        continue;
+                    }
+                };
+
+                let a = packet.to_bytes();
+                if let Err(err) = stream.write_all(a.as_slice()) {
+                    log::error!("Cannot send to address: {} : {}", &addr_receiver, err);
+                }
             }
+        }))
+    }
+
+    pub fn send_file(&self, receiver_receiver2processor: &Receiver<Packet>, sender_processor2sender: &Sender<Packet>) {
+        let addr_dns: SocketAddr = SocketAddr::new(IpAddr::V4(self.configs.env_ip_dns), self.configs.env_port_dns);
+        let addr_current = SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::new(127, 0, 0, 1),
+            self.configs.env_port_receiver,
+        ));
+        let mut packet: Packet;
+
+        // 1. Ask DNS for Master's address
+        log::info!("Ask DNS for Master address");
+        forward_packet(
+            sender_processor2sender,
+            Packet::create_ask_ip(addr_dns, addr_current.port()),
+        );
+        packet = wait_packet(receiver_receiver2processor);
+        if PacketId::AskIpAck != packet.packet_id {
+            log::error!("Must received AskIpAck from DNS. Got: {}", packet.packet_id);
+            exit(1);
         }
+        let addr_master = match packet.addr_master {
+            Some(addr) => addr,
+            None => {
+                log::error!("Received packet not contain addr_master");
+                exit(1);
+            }
+        };
+
+        log::info!("Master address: {}", addr_master);
+
+        // 2. Connect to Master to get addr of node to send data
+        log::info!("Connect to Master");
+
+        let file_name = String::from("cats.jpg");
+        forward_packet(
+            sender_processor2sender,
+            Packet::create_request_from_client(Action::Write, self.configs.env_port_receiver, file_name, addr_master),
+        );
+        packet = wait_packet(receiver_receiver2processor);
+        if PacketId::ResponseNodeIp != packet.packet_id {
+            log::error!("Must received ResponseNodeIp from DNS. Got: {}", packet.packet_id);
+            exit(1);
+        }
+        if packet.addr_data.is_none() {
+            log::error!("Received packet not contained 'addr_data'");
+            exit(1);
+        };
+        let addr_data = packet.addr_data.unwrap();
+
+        log::info!("Data address: {}", addr_data);
+
+        // let addr_data = match wait_packet(receiver_receiver2processor).addr_master {
+        //     Some(addr) => addr,
+        //     None => {
+        //         log::error!("Received packet not contain addr_master");
+        //         exit(1);
+        //     }
+        // };
     }
 }
