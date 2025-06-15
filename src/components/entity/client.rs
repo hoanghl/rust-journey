@@ -1,7 +1,6 @@
-// TODO: HoangLe [May-02]: Implement this
-
 use std::{
-    io::Write,
+    fs::File,
+    io::{Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     process::exit,
     sync::mpsc::{channel, Receiver, Sender},
@@ -87,7 +86,7 @@ impl<'conf> Client<'conf> {
     ) -> Result<JoinHandle<()>, NodeCreationError> {
         log::info!("Creating thread: Receiver");
 
-        let port = self.configs.env_port_receiver;
+        let port = self.configs.args.port;
         let addr_node = SocketAddr::from(([127, 0, 0, 1], port));
         Ok(thread::spawn(move || {
             let listener = match TcpListener::bind(&addr_node) {
@@ -137,41 +136,56 @@ impl<'conf> Client<'conf> {
 
         Ok(thread::spawn(move || {
             for packet in receiver_processor2sender {
-                let addr_receiver = match packet.addr_receiver {
+                let addr_rcv = match packet.addr_rcv {
                     Some(addr) => addr,
                     None => {
-                        log::error!("Field 'addr_receiver' not specified.");
+                        log::error!("Field 'addr_rcv' not specified.");
                         continue;
                     }
                 };
 
                 // Connect and send
-                let mut stream = match TcpStream::connect(&addr_receiver) {
+                let mut stream = match TcpStream::connect(&addr_rcv) {
                     Ok(stream) => stream,
                     Err(_) => {
-                        log::error!("Cannot connect to address: {}", addr_receiver);
+                        log::error!("Cannot connect to address: {}", addr_rcv);
                         continue;
                     }
                 };
 
                 let a = packet.to_bytes();
                 if let Err(err) = stream.write_all(a.as_slice()) {
-                    log::error!("Cannot send to address: {} : {}", &addr_receiver, err);
+                    log::error!("Cannot send to address: {} : {}", &addr_rcv, err);
                 }
             }
         }))
     }
 
     pub fn send_file(&self, receiver_receiver2processor: &Receiver<Packet>, sender_processor2sender: &Sender<Packet>) {
-        let addr_dns: SocketAddr = SocketAddr::new(IpAddr::V4(self.configs.env_ip_dns), self.configs.env_port_dns);
-        let addr_current = SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::new(127, 0, 0, 1),
-            self.configs.env_port_receiver,
-        ));
+        let addr_dns: SocketAddr = SocketAddr::new(IpAddr::V4(self.configs.ip_dns), self.configs.port_dns);
+        let addr_current = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), self.configs.args.port));
+
         let mut packet: Packet;
 
-        // 1. Ask DNS for Master's address
-        log::info!("Ask DNS for Master address");
+        // 1. Read file
+        log::debug!("1. Read file: {:?}", self.configs.args.path);
+
+        let mut file = match File::open(self.configs.args.path.as_ref().unwrap()) {
+            Ok(file) => file,
+            Err(err) => {
+                log::error!("Reading file: {:?}. Got err: {}", self.configs.args.path, err);
+                exit(1);
+            }
+        };
+        let mut binary = Vec::new();
+        if let Err(err) = file.read_to_end(&mut binary) {
+            log::error!("Reading file: {:?}. Got err: {}", self.configs.args.path, err);
+            exit(1);
+        }
+
+        // 2. Ask DNS for Master's address
+        log::debug!("Ask Master address from DNS: {}", addr_dns);
+
         forward_packet(
             sender_processor2sender,
             Packet::create_ask_ip(addr_dns, addr_current.port()),
@@ -189,15 +203,17 @@ impl<'conf> Client<'conf> {
             }
         };
 
-        log::info!("Master address: {}", addr_master);
+        // 3. Connect to Master to get addr of node to send data
+        log::debug!("Connect to Master: {}", addr_master);
 
-        // 2. Connect to Master to get addr of node to send data
-        log::info!("Connect to Master");
-
-        let file_name = String::from("cats.jpg");
         forward_packet(
             sender_processor2sender,
-            Packet::create_request_from_client(Action::Write, self.configs.env_port_receiver, file_name, addr_master),
+            Packet::create_request_from_client(
+                Action::Write,
+                self.configs.args.port,
+                self.configs.args.name.as_ref().unwrap(),
+                addr_master,
+            ),
         );
         packet = wait_packet(receiver_receiver2processor);
         if PacketId::ResponseNodeIp != packet.packet_id {
@@ -210,14 +226,16 @@ impl<'conf> Client<'conf> {
         };
         let addr_data = packet.addr_data.unwrap();
 
-        log::info!("Data address: {}", addr_data);
+        // 4. Connect to Data node to send file
+        log::debug!(
+            "Connect to Data node to send file: {} - {:?}",
+            addr_data,
+            self.configs.args.path
+        );
 
-        // let addr_data = match wait_packet(receiver_receiver2processor).addr_master {
-        //     Some(addr) => addr,
-        //     None => {
-        //         log::error!("Received packet not contain addr_master");
-        //         exit(1);
-        //     }
-        // };
+        forward_packet(
+            sender_processor2sender,
+            Packet::create_client_upload(addr_data, self.configs.args.name.as_ref().unwrap(), binary),
+        );
     }
 }

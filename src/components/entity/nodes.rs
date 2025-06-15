@@ -1,6 +1,7 @@
 use log;
 
 use std::{
+    fs::File,
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     process::exit,
@@ -12,7 +13,7 @@ use std::{
 
 use crate::components::{
     configs::Configs,
-    db::{FileInfoDB, FileInfoEntry, NodeInfoDB},
+    db::{FileInfoDB, FileInfoEntry, NodeInfoDB, _get_node_id},
     entity::node_roles::Role,
     errors::NodeCreationError,
     packets::{forward_packet, Action, Packet, PacketId},
@@ -87,8 +88,8 @@ impl Node {
         log::info!("Creating thread: Receiver");
 
         let port = match self.role {
-            Role::DNS => self.configs.env_port_dns,
-            _ => self.configs.env_port_receiver,
+            Role::DNS => self.configs.port_dns,
+            _ => self.configs.args.port,
         };
         let addr_node = SocketAddr::from(([127, 0, 0, 1], port));
         Ok(thread::spawn(move || {
@@ -138,26 +139,26 @@ impl Node {
 
         Ok(thread::spawn(move || {
             for packet in receiver_processor2sender {
-                let addr_receiver = match packet.addr_receiver {
+                let addr_rcv = match packet.addr_rcv {
                     Some(addr) => addr,
                     None => {
-                        log::error!("Field 'addr_receiver' not specified.");
+                        log::error!("Field 'addr_rcv' not specified.");
                         continue;
                     }
                 };
 
                 // Connect and send
-                let mut stream = match TcpStream::connect(&addr_receiver) {
+                let mut stream = match TcpStream::connect(&addr_rcv) {
                     Ok(stream) => stream,
                     Err(_) => {
-                        log::error!("Cannot connect to address: {}", addr_receiver);
+                        log::error!("Cannot connect to address: {}", addr_rcv);
                         continue;
                     }
                 };
 
                 let a = packet.to_bytes();
                 if let Err(err) = stream.write_all(a.as_slice()) {
-                    log::error!("Cannot send to address: {} : {}", &addr_receiver, err);
+                    log::error!("Cannot send to address: {} : {}", &addr_rcv, err);
                 }
             }
         }))
@@ -174,12 +175,9 @@ impl Node {
         receiver_receiver2processor: &Receiver<Packet>,
         sender_processor2sender: &Sender<Packet>,
     ) {
-        let addr_dns: SocketAddr = SocketAddr::new(IpAddr::V4(self.configs.env_ip_dns), self.configs.env_port_dns);
+        let addr_dns: SocketAddr = SocketAddr::new(IpAddr::V4(self.configs.ip_dns), self.configs.port_dns);
         let mut addr_master: Option<SocketAddr> = None;
-        let addr_current = SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::new(127, 0, 0, 1),
-            self.configs.env_port_receiver,
-        ));
+        let addr_current = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), self.configs.args.port));
 
         // For data management
         let node_info = NodeInfoDB::intialize("node_info");
@@ -233,8 +231,7 @@ impl Node {
             Role::Data => {
                 // Ask Master IP from DNS and notify to current master
 
-                if let Err(err) =
-                    sender_processor2sender.send(Packet::create_ask_ip(addr_dns, self.configs.env_port_receiver))
+                if let Err(err) = sender_processor2sender.send(Packet::create_ask_ip(addr_dns, self.configs.args.port))
                 {
                     log::error!("Error as sending AskIP: {}", err);
                     self.trigger_graceful_shutdown();
@@ -261,10 +258,6 @@ impl Node {
                 };
 
                 match self.role {
-                    Role::Default => {
-                        log::error!("Role:Default not allow. Exitting.");
-                        break;
-                    }
                     Role::DNS => {
                         match packet.packet_id {
                             PacketId::AskIp => {
@@ -352,13 +345,52 @@ impl Node {
                                     }
                                     Action::Write => {
                                         let mut add_node = addr_current.clone();
-                                        add_node.set_port(self.configs.env_port_receiver);
+                                        add_node.set_port(self.configs.args.port);
 
                                         forward_packet(
                                             sender_processor2sender,
                                             Packet::create_response_node_ip(packet.addr_sender.unwrap(), add_node),
                                         );
                                     }
+                                }
+                            }
+                            PacketId::ClientUpload => {
+                                // TODO: HoangLe [Jun-15]: Implement Replication process:
+                                // TODO: HoangLe [Jun-15]: 1. Implement algorithm to select node to store
+                                // TODO: HoangLe [Jun-15]: 2. Replace 'addr_current' by address of data node
+                                // TODO: HoangLe [Jun-15]: 3. Select suitable place to store file
+
+                                let path = "/Users/hoangle/Projects/xButler/cats_.jpg";
+
+                                // Insert data
+                                let ip = match addr_current.ip() {
+                                    IpAddr::V4(ip) => ip,
+                                    _ => {
+                                        log::error!("Cannot parse addr_current to IpV4 format: {}", { addr_current });
+                                        continue;
+                                    }
+                                };
+                                let file_info = FileInfoEntry::initialize(
+                                    String::from(packet.filename.unwrap()),
+                                    true,
+                                    Some(String::from(path)),
+                                    String::from(_get_node_id(&ip, addr_current.port())),
+                                );
+                                if let Err(err) = data_info.upsert(&file_info) {
+                                    log::error!("Error as upsert: {}", err);
+                                    exit(1);
+                                }
+
+                                // Store data
+                                let mut file = match File::create_new(path) {
+                                    Ok(file) => file,
+                                    Err(err) => {
+                                        log::error!("Cannot create new file: {}: Err: {}", path, err);
+                                        continue;
+                                    }
+                                };
+                                if let Err(err) = file.write_all(&packet.binary.as_ref().unwrap().as_slice()) {
+                                    log::error!("Err as writing data to file: {} - Err: {}", path, err);
                                 }
                             }
                             _ => {
@@ -396,6 +428,10 @@ impl Node {
                             continue;
                         }
                     },
+                    _ => {
+                        log::error!("Invalid role. Got: {}", self.role);
+                        exit(1)
+                    }
                 }
             }
 

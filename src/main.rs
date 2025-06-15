@@ -15,23 +15,23 @@ fn main() {
     // ================================================
     // Establish server
     // ================================================
-    match configs.args[1].as_str() {
-        "master" => {
+    match configs.args.role {
+        Role::Master => {
             let mut node = Node::new(configs, Role::Master);
             node.start();
         }
-        "data" => {
+        Role::Data => {
             let mut node = Node::new(configs, Role::Data);
             node.start();
         }
-        "dns" => {
+        Role::DNS => {
             let mut node = Node::new(configs, Role::DNS);
             node.start()
         }
-        "client" => {
+        Role::Client => {
             let mut client = Client::new(&configs);
             client.start(Action::Write);
         }
-        _ => panic!("First argument must be a valid mode"),
+        _ => panic!("Invalid role argument"),
     };
 }
