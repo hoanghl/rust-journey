@@ -1,7 +1,7 @@
 use log;
+use rusqlite::Connection;
 
 use std::{
-    fs::File,
     io::Write,
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     process::exit,
@@ -13,9 +13,10 @@ use std::{
 
 use crate::components::{
     configs::Configs,
-    db::{FileInfoDB, FileInfoEntry, NodeInfoDB, _get_node_id},
+    db::{self, conv_addr2id, FileInfoDB, FileInfoEntry, NodeInfoDB},
     entity::node_roles::Role,
     errors::NodeCreationError,
+    file_utils::FileUtils,
     packets::{forward_packet, Action, Packet, PacketId},
 };
 
@@ -91,7 +92,7 @@ impl Node {
             Role::DNS => self.configs.port_dns,
             _ => self.configs.args.port,
         };
-        let addr_node = SocketAddr::from(([127, 0, 0, 1], port));
+        let addr_node = SocketAddr::from(([0, 0, 0, 0], port));
         Ok(thread::spawn(move || {
             let listener = match TcpListener::bind(&addr_node) {
                 Ok(listener) => listener,
@@ -180,34 +181,37 @@ impl Node {
         let addr_current = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), self.configs.args.port));
 
         // For data management
-        let node_info = NodeInfoDB::intialize("node_info");
-        let data_info = FileInfoDB::intialize("file_info");
-
-        // NOTE: HoangLe [Jun-14]: The following is for testing purpose. Remove after testing
-        if let Role::Master = self.role {
-            let file_info = FileInfoEntry::initialize(
-                String::from("cats.jpg"),
-                true,
-                Some(String::from("/Users/hoangle/Projects/xButler/cats.jpg")),
-                String::from("127.0.0.1:123"),
-            );
-            if let Err(err) = data_info.upsert(&file_info) {
-                log::error!("Error as upsert: {}", err);
-                exit(1);
+        let file_utils = match FileUtils::new(&self.configs) {
+            Ok(file_utils) => file_utils,
+            Err(err) => {
+                log::error!("Err as creating file_utils: {}", err);
+                return;
             }
+        };
 
-            match data_info.get_file_info(&file_info.filename) {
-                Ok(file_info) => {
-                    file_info.iter().for_each(|x| {
-                        log::info!("{} - {} - {:?} - {:?}", x.filename, x.node_id, x.path, x.last_updated)
-                    });
-                }
-                Err(err) => {
-                    log::error!("{}", err);
-                    exit(1);
-                }
+        let name_db_node = "node_info";
+        let name_db_file = "file_info";
+        let conn = match Connection::open_in_memory() {
+            Ok(conn) => conn,
+            Err(err) => {
+                log::error!("Error as initializing in-memory DB: {}", err);
+                exit(1)
             }
-        }
+        };
+        let node_info = match NodeInfoDB::intialize(name_db_node, &conn) {
+            Ok(db) => db,
+            Err(err) => {
+                log::error!("Error as initializing in-memory DB: {}", err);
+                exit(1)
+            }
+        };
+        let data_info = match FileInfoDB::intialize(name_db_file, &conn) {
+            Ok(db) => db,
+            Err(err) => {
+                log::error!("Error as initializing in-memory DB: {}", err);
+                exit(1)
+            }
+        };
 
         // For counter: Use for heartbeat timer
         let mut last_ts: Option<SystemTime> = None;
@@ -344,13 +348,22 @@ impl Node {
                                         // TODO: HoangLe [Jun-14]: Implement this
                                     }
                                     Action::Write => {
-                                        let mut add_node = addr_current.clone();
-                                        add_node.set_port(self.configs.args.port);
+                                        let node_ids =
+                                            match db::get_nodes_replication(&conn, name_db_node, name_db_file, 2) {
+                                                Ok(node_ids) => node_ids,
+                                                Err(err) => {
+                                                    log::error!("{}", err);
+                                                    continue;
+                                                }
+                                            };
 
+                                        let node_rcv_data = node_ids[0];
                                         forward_packet(
                                             sender_processor2sender,
-                                            Packet::create_response_node_ip(packet.addr_sender.unwrap(), add_node),
+                                            Packet::create_response_node_ip(packet.addr_sender.unwrap(), node_rcv_data),
                                         );
+
+                                        // TODO: HoangLe [Jun-22]: Continue with Replication flow
                                     }
                                 }
                             }
@@ -360,7 +373,13 @@ impl Node {
                                 // TODO: HoangLe [Jun-15]: 2. Replace 'addr_current' by address of data node
                                 // TODO: HoangLe [Jun-15]: 3. Select suitable place to store file
 
-                                let path = "/Users/hoangle/Projects/xButler/cats_.jpg";
+                                let filename = packet.filename.unwrap();
+
+                                // Store data
+                                if let Err(err) = file_utils.save_file(&filename, packet.binary.as_ref().unwrap()) {
+                                    log::error!("Cannot create new file: {}: Err: {}", filename, err);
+                                    continue;
+                                };
 
                                 // Insert data
                                 let ip = match addr_current.ip() {
@@ -370,27 +389,15 @@ impl Node {
                                         continue;
                                     }
                                 };
+
                                 let file_info = FileInfoEntry::initialize(
-                                    String::from(packet.filename.unwrap()),
+                                    filename,
                                     true,
-                                    Some(String::from(path)),
-                                    String::from(_get_node_id(&ip, addr_current.port())),
+                                    String::from(conv_addr2id(&ip, addr_current.port())),
                                 );
                                 if let Err(err) = data_info.upsert(&file_info) {
                                     log::error!("Error as upsert: {}", err);
                                     exit(1);
-                                }
-
-                                // Store data
-                                let mut file = match File::create_new(path) {
-                                    Ok(file) => file,
-                                    Err(err) => {
-                                        log::error!("Cannot create new file: {}: Err: {}", path, err);
-                                        continue;
-                                    }
-                                };
-                                if let Err(err) = file.write_all(&packet.binary.as_ref().unwrap().as_slice()) {
-                                    log::error!("Err as writing data to file: {} - Err: {}", path, err);
                                 }
                             }
                             _ => {
@@ -422,6 +429,34 @@ impl Node {
                                 );
                             }
                         },
+                        PacketId::ClientUpload => {
+                            let filename = packet.filename.unwrap();
+
+                            // Store data
+                            if let Err(err) = file_utils.save_file(&filename, packet.binary.as_ref().unwrap()) {
+                                log::error!("Cannot create new file: {}: Err: {}", filename, err);
+                                continue;
+                            };
+
+                            // Insert data
+                            let ip = match addr_current.ip() {
+                                IpAddr::V4(ip) => ip,
+                                _ => {
+                                    log::error!("Cannot parse addr_current to IpV4 format: {}", { addr_current });
+                                    continue;
+                                }
+                            };
+
+                            let file_info = FileInfoEntry::initialize(
+                                filename,
+                                true,
+                                String::from(conv_addr2id(&ip, addr_current.port())),
+                            );
+                            if let Err(err) = data_info.upsert(&file_info) {
+                                log::error!("Error as upsert: {}", err);
+                                exit(1);
+                            }
+                        }
 
                         _ => {
                             log::error!("Unsupported packet type: {}", packet);
@@ -436,51 +471,52 @@ impl Node {
             }
 
             // If current node is Master, check timer and send Heartbeat
-            match self.role {
-                Role::Master => {
-                    if last_ts.is_none() {
-                        last_ts = Some(SystemTime::now());
-                    } else {
-                        match SystemTime::now().duration_since(last_ts.unwrap()) {
-                            Ok(n) => {
-                                if n.as_secs() >= self.configs.interval_heartbeat {
-                                    last_ts = Some(SystemTime::now());
+            // FIXME: HoangLe [Jun-21]: Remove the following after testing
+            // match self.role {
+            //     Role::Master => {
+            //         if last_ts.is_none() {
+            //             last_ts = Some(SystemTime::now());
+            //         } else {
+            //             match SystemTime::now().duration_since(last_ts.unwrap()) {
+            //                 Ok(n) => {
+            //                     if n.as_secs() >= self.configs.interval_heartbeat {
+            //                         last_ts = Some(SystemTime::now());
 
-                                    // Send heartbeat
-                                    if let Ok(data_nodes) = node_info.get_data_nodes() {
-                                        for node in &data_nodes {
-                                            match node.ip {
-                                                None => {
-                                                    log::error!(
-                                                        "Cannot retrieve ip from node with node_id = {}",
-                                                        node.node_id
-                                                    );
-                                                    continue;
-                                                }
-                                                Some(ip) => {
-                                                    let addr = SocketAddr::V4(SocketAddrV4::new(ip, node.port));
+            //                         // Send heartbeat
+            //                         if let Ok(data_nodes) = node_info.get_data_nodes() {
+            //                             for node in &data_nodes {
+            //                                 match node.ip {
+            //                                     None => {
+            //                                         log::error!(
+            //                                             "Cannot retrieve ip from node with node_id = {}",
+            //                                             node.node_id
+            //                                         );
+            //                                         continue;
+            //                                     }
+            //                                     Some(ip) => {
+            //                                         let addr = SocketAddr::V4(SocketAddrV4::new(ip, node.port));
 
-                                                    log::info!("Send HEARTBEAT to {}", addr);
-                                                    forward_packet(
-                                                        sender_processor2sender,
-                                                        Packet::create_heartbeat(addr),
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                log::error!("{}", err);
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    last_ts = None;
-                }
-            }
+            //                                         log::info!("Send HEARTBEAT to {}", addr);
+            //                                         forward_packet(
+            //                                             sender_processor2sender,
+            //                                             Packet::create_heartbeat(addr),
+            //                                         );
+            //                                     }
+            //                                 }
+            //                             }
+            //                         }
+            //                     }
+            //                 }
+            //                 Err(err) => {
+            //                     log::error!("{}", err);
+            //                 }
+            //             }
+            //         }
+            //     }
+            //     _ => {
+            //         last_ts = None;
+            //     }
+            // }
         }
     }
 }

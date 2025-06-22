@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use crate::components::{db::_get_node_id, entity::node_roles::Role, errors::ParseError};
+use crate::components::{db::conv_addr2id, entity::node_roles::Role, errors::ParseError};
 
 // ================================================
 // Definition for enum and constants
@@ -515,7 +515,7 @@ impl Packet {
         let mut payload = Vec::<u8>::new();
         match addr_current {
             SocketAddr::V4(addr) => {
-                payload.extend_from_slice(_get_node_id(addr.ip(), addr.port()).as_bytes());
+                payload.extend_from_slice(conv_addr2id(addr.ip(), addr.port()).as_bytes());
             }
             _ => {
                 log::error!("Creating HEARTBEAT_ACK, but IP of current node isn't IPv4 format.");
