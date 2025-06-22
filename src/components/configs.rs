@@ -21,6 +21,12 @@ pub struct Args {
     pub port: u16,
 
     // ================================================
+    // Data/Master-specific arguments
+    // ================================================
+    #[arg(short, long, default_value = "./data")]
+    pub dir_data: String,
+
+    // ================================================
     // Client-specific arguments
     // ================================================
 
