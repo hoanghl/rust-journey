@@ -3,8 +3,13 @@ use std::{
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     process::exit,
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{channel, Receiver, Sender},
+        Arc,
+    },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use log;
@@ -37,15 +42,16 @@ impl<'conf> Client<'conf> {
         // ================================================
         // Declare different threads for different functions
         // ================================================
+        let flag_stop = Arc::new(AtomicBool::new(false));
 
-        let thread_receiver = match self.create_thread_receiver(sender_receiver2processor) {
+        let thread_receiver = match self.create_thread_receiver(sender_receiver2processor, &flag_stop) {
             Ok(handle) => handle,
             Err(err) => {
                 log::error!("{}", err);
                 return;
             }
         };
-        let thread_sender = match self.create_thread_sender(receiver_processor2sender) {
+        let thread_sender = match self.create_thread_sender(receiver_processor2sender, &flag_stop) {
             Ok(handle) => handle,
             Err(err) => {
                 log::error!("{}", err);
@@ -68,6 +74,7 @@ impl<'conf> Client<'conf> {
         // ================================================
         // Join threads
         // ================================================
+        self.shutdown_gracefully(&flag_stop);
 
         if let Err(err) = thread_receiver.join() {
             log::error!("Error as creating thread_receiver: {:?}", err);
@@ -79,15 +86,26 @@ impl<'conf> Client<'conf> {
         }
     }
 
+    fn shutdown_gracefully(&self, flag_stop: &Arc<AtomicBool>) {
+        flag_stop.store(true, Ordering::Relaxed);
+
+        if let Err(err) = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], self.configs.args.port))) {
+            log::error!("Error as executing gracefull shutdown: {}", err);
+        };
+    }
+
     /// Create a thread dedicated for receiving incoming message
     fn create_thread_receiver(
         &mut self,
         sender_receiver2processor: Sender<Packet>,
+        flag_stop: &Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>, NodeCreationError> {
         log::info!("Creating thread: Receiver");
 
         let port = self.configs.args.port;
         let addr_node = SocketAddr::from(([127, 0, 0, 1], port));
+        let flag = Arc::clone(&flag_stop);
+
         Ok(thread::spawn(move || {
             let listener = match TcpListener::bind(&addr_node) {
                 Ok(listener) => listener,
@@ -99,6 +117,10 @@ impl<'conf> Client<'conf> {
             log::info!("Server starts at {}", addr_node);
 
             for stream in listener.incoming() {
+                if flag.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 match stream {
                     Ok(mut stream) => {
                         let packet = match Packet::from_stream(&mut stream) {
@@ -130,12 +152,23 @@ impl<'conf> Client<'conf> {
     fn create_thread_sender(
         &mut self,
         receiver_processor2sender: Receiver<Packet>,
+        flag_stop: &Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>, NodeCreationError> {
         // NOTE: HoangLe [Jun-14]: Consider removing this implementation after converting Node to trait
         log::info!("Creating thread: Sender");
 
+        let duration = self.configs.timeout_chan_wait;
+        let flag = Arc::clone(&flag_stop);
         Ok(thread::spawn(move || {
-            for packet in receiver_processor2sender {
+            loop {
+                if flag.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                let packet = match receiver_processor2sender.recv_timeout(Duration::from_secs(duration)) {
+                    Ok(packet) => packet,
+                    Err(_) => continue,
+                };
                 let addr_rcv = match packet.addr_rcv {
                     Some(addr) => addr,
                     None => {
